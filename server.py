@@ -35,7 +35,7 @@ import uuid
 import datetime
 import time
 
-global serverList# = defaultdict(list)
+global serverList
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
 executors = defaultdict(list)  # Dict mapping buffer ids to pgexecutor objects
@@ -43,7 +43,6 @@ executor_lock = Lock()
 bufferConnections = defaultdict(str) #Dict mapping bufferids to connectionstrings
 queryResults = defaultdict(list)
 global config
-noticepoll_stop = threading.Event()
 
 def main(args=None):
     global serverList
@@ -135,6 +134,7 @@ def run_sql(alias, sql, uuid):
             'rows': None,
             'query': sql,
             'notices': None,
+            'statusmessage': None,
             'complete': False,
             'executing': False,
             'timestamp': None,
@@ -152,13 +152,6 @@ def run_sql(alias, sql, uuid):
                 currentQuery['executing'] = True
                 queryResults[uuid][n] = currentQuery
 
-                #start polling notices
-                #t = Thread(target=get_notices,
-                #               args=(currentQuery, uuid, n, executor),
-                #               name='get_notices')
-                #t.setDaemon(True)
-                #t.start()
-
                 #run query
                 try:
                     cur.execute(qr['query'])
@@ -166,11 +159,12 @@ def run_sql(alias, sql, uuid):
                     currentQuery['rows'] = [x for x in cur.fetchall()]
                 except psycopg2.Error as e:
                     currentQuery['error'] = str(e)
+
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
                 currentQuery['complete'] = True
                 currentQuery['executing'] = False
-                #TODO: statusmessage of statement.
+                currentQuery['statusmessage'] = cur.statusmessage
 
                 notices = []
                 while executor.conn.notices:
@@ -178,17 +172,6 @@ def run_sql(alias, sql, uuid):
                 currentQuery['notices'] = notices
 
                 queryResults[uuid][n] = currentQuery
-                #stop polling notices
-                #noticepoll_stop.set()
-
-def get_notices(currentQuery, uuid, n, executor):
-    notices = []
-    while(not noticepoll_stop.is_set()):
-        while executor.conn.notices:
-            notices = executor.conn.notices.pop(0)
-        currentQuery['notices'] = notices
-        queryResults[uuid][n] = currentQuery
-        noticepoll_stop.wait(0.1)
 
 app = Flask(__name__)
 @app.route("/query", methods=['POST'])
