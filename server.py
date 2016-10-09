@@ -76,9 +76,9 @@ def remove_server(alias):
 def connect_server(alias, authkey=None):
     server = next((s for (a, s) in serverList.items() if a == alias), None)
     if not server:
-        return {'success':False, 'errormessage':'Unknown alias.'}
+        return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
     if executors[alias]:
-        return {'success':False, 'errormessage':'Already connected to server.'}
+        return {'alias': alias, 'success':False, 'errormessage':'Already connected to server.'}
     refresher = CompletionRefresher()
     try:
         executor = new_executor(server['url'], authkey)
@@ -88,7 +88,7 @@ def connect_server(alias, authkey=None):
                             lambda c: swap_completer(c, alias)))
     except psycopg2.Error as e:
         return {'success':False, 'errormessage':str(e)}
-    return {'success':True, 'errormessage':None}
+    return {'alias': alias, 'success':True, 'errormessage':None}
 
 def refresh_servers():
     for alias, server in serverList.items():
@@ -100,8 +100,29 @@ def refresh_servers():
             except psycopg2.OperationalError:
                 server['connected'] = False
                 del executors[alias]
+            except AttributeError:
+                server['connected'] = False
         else:
             server['connected'] = False
+
+def any_connected_server():
+    any_connected_server = False
+    for alias, server in serverList.items():
+        if alias in executors:
+            try:
+                with executors[alias].conn.cursor() as cur:
+                    cur.execute('SELECT 1')
+                    server['connected'] = True
+                    any_connected_server = True
+            except psycopg2.OperationalError:
+                server['connected'] = False
+                del executors[alias]
+            except AttributeError:
+                server['connected'] = False
+        else:
+            server['connected'] = False
+
+    return any_connected_server
 
 def disconnect_server(alias):
     if alias not in executors:
@@ -126,6 +147,19 @@ def new_executor(url, pwd=None):
 
 def swap_completer(comp,alias):
     completers[alias] = comp
+
+def cleanup(t):
+    encoder = json.JSONEncoder()
+    lst = []
+    for z in t:
+        encoded = 'fail'
+        try:
+            encoder.encode(z)
+            lst.append(z)
+        except TypeError:
+            lst.append(str(z))
+
+    return tuple(lst)
 
 def run_sql(alias, sql, uuid):
     for sql in sqlparse.split(sql):
@@ -156,7 +190,8 @@ def run_sql(alias, sql, uuid):
                 try:
                     cur.execute(qr['query'])
                     currentQuery['columns'] = [{'name': d.name, 'type_code': d.type_code} for d in cur.description]
-                    currentQuery['rows'] = [x for x in cur.fetchall()]
+                    currentQuery['rows'] = [cleanup(x) for x in cur.fetchall()]
+
                 except psycopg2.Error as e:
                     currentQuery['error'] = str(e)
 
@@ -179,6 +214,9 @@ def query():
     alias = request.form.get('alias', 'Vagrant')
     sql = request.form['query']
     uid = str(uuid.uuid1())
+    if not any_connected_server():
+        return Response(str('not_connected'))
+
     t = Thread(target=run_sql,
                    args=(alias, sql, uid),
                    name='run_sql')
@@ -195,11 +233,13 @@ def result(uuid):
             r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
     return Response(str(json.dumps(result)), mimetype='text/json')
 
-@app.route("/pos/<pos>/query/<query>")
-def completer(pos,query):
-    comps = completer.get_completions(
+@app.route("/completions", methods=['POST'])
+def completer():
+    pos = request.form['pos']
+    query = request.form['query']
+    comps = completers['Vagrant'].get_completions(
                 Document(text=query, cursor_position=int(pos)), None)
-    return Response(str(json.dumps([c.text for c in comps])), mimetype='text/json')
+    return Response(str(json.dumps([{'text': c.text, 'type': c._display_meta} for c in comps])), mimetype='text/json')
 
 @app.route("/listservers")
 def list_servers():
