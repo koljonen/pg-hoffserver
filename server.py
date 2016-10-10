@@ -34,6 +34,12 @@ import json
 import uuid
 import datetime
 import time
+from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
+                                TRANSACTION_STATUS_ACTIVE,
+                                TRANSACTION_STATUS_INTRANS,
+                                TRANSACTION_STATUS_INERROR,
+                                TRANSACTION_STATUS_UNKNOWN)
+
 
 global serverList
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
@@ -94,34 +100,29 @@ def refresh_servers():
     for alias, server in serverList.items():
         if alias in executors:
             try:
-                with executors[alias].conn.cursor() as cur:
-                    cur.execute('SELECT 1')
+                if executors.get(alias).conn.closed == 0:
                     server['connected'] = True
-            except psycopg2.OperationalError:
+                else:
+                    server['connected'] = False
+                    del executors[alias]
+            except:
                 server['connected'] = False
                 del executors[alias]
-            except AttributeError:
-                server['connected'] = False
         else:
             server['connected'] = False
 
-def server_connected(alias):
+def server_status(alias):
     server = next((s for (a, s) in serverList.items() if a == alias), None)
     if not server:
-        return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
+        return {'alias':alias, 'guid':None, 'success':False, 'errormessage':'Unknown alias.'}
     if executors[alias]:
-        try:
-            with executors[alias].conn.cursor() as cur:
-                cur.execute('SELECT 1')
-                return True
-        except psycopg2.OperationalError:
+        if executors[alias].conn.closed == 1:
             server['connected'] = False
             del executors[alias]
-            return False
-        except AttributeError:
-            server['connected'] = False
-            return False
-    return False
+            return {'alias':alias, 'guid':None, 'success':False, 'Url':None, 'errormessage':'Not connected.'}
+    else:
+        return {'alias':alias, 'guid':None, 'success':False, 'Url':None, 'errormessage':None}
+    return {'success':True}
 
 def disconnect_server(alias):
     if alias not in executors:
@@ -158,9 +159,19 @@ def format_row(row):
             columns.append(str(column))
     return tuple(columns)
 
-def run_sql(alias, sql, uuid):
+def get_transaction_status_text(status):
+    return {
+        TRANSACTION_STATUS_IDLE: 'idle',
+        TRANSACTION_STATUS_ACTIVE: 'active',
+        TRANSACTION_STATUS_INTRANS: 'intrans',
+        TRANSACTION_STATUS_INERROR: 'inerror',
+        TRANSACTION_STATUS_UNKNOWN: 'unknown'
+    }[status]
+
+def run_sql(alias, sql, uuid, autocommit=True):
     for sql in sqlparse.split(sql):
         queryResults[uuid].append({
+            'alias': alias,
             'columns': None,
             'rows': None,
             'query': sql,
@@ -170,11 +181,16 @@ def run_sql(alias, sql, uuid):
             'executing': False,
             'timestamp': None,
             'runtime_seconds': None,
-            'error':None
+            'error':None,
+            'transaction_status':None
         })
     executor = executors[alias]
+    if not executor:
+        return
     with executor_lock:
         with executor.conn.cursor() as cur:
+            #if executor.conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
+                #executor.conn.autocommit = autocommit
             for n, qr in enumerate(queryResults[uuid]):
                 timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
@@ -186,11 +202,12 @@ def run_sql(alias, sql, uuid):
                 #run query
                 try:
                     cur.execute(qr['query'])
-                    currentQuery['columns'] = [{'name': d.name, 'type_code': d.type_code} for d in cur.description]
-                    currentQuery['rows'] = [format_row(row) for row in cur.fetchall()]
-
                 except psycopg2.Error as e:
                     currentQuery['error'] = str(e)
+
+                if cur.description:
+                    currentQuery['columns'] = [{'name': d.name, 'type_code': d.type_code} for d in cur.description]
+                    currentQuery['rows'] = [format_row(row) for row in cur.fetchall()]
 
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
@@ -202,39 +219,46 @@ def run_sql(alias, sql, uuid):
                 while executor.conn.notices:
                     notices.append(executor.conn.notices.pop(0))
                 currentQuery['notices'] = notices
-
                 queryResults[uuid][n] = currentQuery
 
 app = Flask(__name__)
 @app.route("/query", methods=['POST'])
 def query():
-    alias = request.form.get('alias', 'Tennis')
+    alias = request.form.get('alias', 'Vagrant')
     sql = request.form['query']
+    autocommit = request.form.get('autocommit', '1') == '1'
     uid = str(uuid.uuid1())
-    if not server_connected(alias):
-        return Response(str(json.dumps({'success':False, 'Url':None, 'errormessage':'Not connected.'})), mimetype='text/json')
+    sstatus = server_status(alias)
+    if not sstatus['success']:
+        return Response(str(json.dumps(sstatus)), mimetype='text/json')
 
     t = Thread(target=run_sql,
-                   args=(alias, sql, uid),
+                   args=(alias, sql, uid, autocommit),
                    name='run_sql')
     t.setDaemon(True)
     t.start()
-    #return Response(str(json.dumps({'success':True, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
-    return'localhost:5000/result/' + uid
+    return Response(str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
+    #return'localhost:5000/result/' + uid
 @app.route("/result/<uuid>")
 def result(uuid):
     result = queryResults[uuid]
-    for r in result:
-        if r['executing'] == 1:
-            timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
-            r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-    return Response(str(json.dumps(result)), mimetype='text/json')
+    if not result:
+        return Response(str(json.dumps({'success':False, 'errormessage':'Not connected.'})), mimetype='text/json')
+    try:
+        for r in result:
+            if r['executing'] == True:
+                timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
+                r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+            r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
+        return Response(str(json.dumps(result)), mimetype='text/json')
+    except:
+        return Response(str(json.dumps({'success':False, 'errormessage':'Not connected.'})), mimetype='text/json')
 
 @app.route("/completions", methods=['POST'])
 def completions():
     pos = request.form['pos']
     query = request.form['query']
-    alias = request.form.get('alias', 'Tennis')
+    alias = request.form.get('alias', 'Vagrant')
     if alias in completers:
         comps = completers[alias].get_completions(
                     Document(text=query, cursor_position=int(pos)), None)
