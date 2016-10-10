@@ -105,24 +105,23 @@ def refresh_servers():
         else:
             server['connected'] = False
 
-def any_connected_server():
-    any_connected_server = False
-    for alias, server in serverList.items():
-        if alias in executors:
-            try:
-                with executors[alias].conn.cursor() as cur:
-                    cur.execute('SELECT 1')
-                    server['connected'] = True
-                    any_connected_server = True
-            except psycopg2.OperationalError:
-                server['connected'] = False
-                del executors[alias]
-            except AttributeError:
-                server['connected'] = False
-        else:
+def server_connected(alias):
+    server = next((s for (a, s) in serverList.items() if a == alias), None)
+    if not server:
+        return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
+    if executors[alias]:
+        try:
+            with executors[alias].conn.cursor() as cur:
+                cur.execute('SELECT 1')
+                return True
+        except psycopg2.OperationalError:
             server['connected'] = False
-
-    return any_connected_server
+            del executors[alias]
+            return False
+        except AttributeError:
+            server['connected'] = False
+            return False
+    return False
 
 def disconnect_server(alias):
     if alias not in executors:
@@ -148,18 +147,16 @@ def new_executor(url, pwd=None):
 def swap_completer(comp,alias):
     completers[alias] = comp
 
-def cleanup(t):
+def format_row(row):
     encoder = json.JSONEncoder()
-    lst = []
-    for z in t:
-        encoded = 'fail'
+    columns = []
+    for column in row:
         try:
-            encoder.encode(z)
-            lst.append(z)
+            encoder.encode()
+            columns.append(column)
         except TypeError:
-            lst.append(str(z))
-
-    return tuple(lst)
+            columns.append(str(column))
+    return tuple(columns)
 
 def run_sql(alias, sql, uuid):
     for sql in sqlparse.split(sql):
@@ -190,7 +187,7 @@ def run_sql(alias, sql, uuid):
                 try:
                     cur.execute(qr['query'])
                     currentQuery['columns'] = [{'name': d.name, 'type_code': d.type_code} for d in cur.description]
-                    currentQuery['rows'] = [cleanup(x) for x in cur.fetchall()]
+                    currentQuery['rows'] = [format_row(row) for row in cur.fetchall()]
 
                 except psycopg2.Error as e:
                     currentQuery['error'] = str(e)
@@ -211,19 +208,19 @@ def run_sql(alias, sql, uuid):
 app = Flask(__name__)
 @app.route("/query", methods=['POST'])
 def query():
-    alias = request.form.get('alias', 'Vagrant')
+    alias = request.form.get('alias', 'Tennis')
     sql = request.form['query']
     uid = str(uuid.uuid1())
-    if not any_connected_server():
-        return Response(str('not_connected'))
+    if not server_connected(alias):
+        return Response(str(json.dumps({'success':False, 'Url':None, 'errormessage':'Not connected.'})), mimetype='text/json')
 
     t = Thread(target=run_sql,
                    args=(alias, sql, uid),
                    name='run_sql')
     t.setDaemon(True)
     t.start()
-    return 'localhost:5000/result/' + uid
-
+    #return Response(str(json.dumps({'success':True, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
+    return'localhost:5000/result/' + uid
 @app.route("/result/<uuid>")
 def result(uuid):
     result = queryResults[uuid]
@@ -234,12 +231,15 @@ def result(uuid):
     return Response(str(json.dumps(result)), mimetype='text/json')
 
 @app.route("/completions", methods=['POST'])
-def completer():
+def completions():
     pos = request.form['pos']
     query = request.form['query']
-    comps = completers['Vagrant'].get_completions(
-                Document(text=query, cursor_position=int(pos)), None)
-    return Response(str(json.dumps([{'text': c.text, 'type': c._display_meta} for c in comps])), mimetype='text/json')
+    alias = request.form.get('alias', 'Tennis')
+    if alias in completers:
+        comps = completers[alias].get_completions(
+                    Document(text=query, cursor_position=int(pos)), None)
+        return Response(str(json.dumps([{'text': c.text, 'type': c._display_meta} for c in comps])), mimetype='text/json')
+    return Response(str(json.dumps({'success':False, 'errormessage':'Not connected to server.'})), mimetype='text/json')
 
 @app.route("/listservers")
 def list_servers():
