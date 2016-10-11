@@ -1,3 +1,4 @@
+from __future__ import unicode_literals
 from flask import Flask, request, Response
 import logging
 import threading
@@ -5,9 +6,9 @@ import sys
 import os
 import site
 import traceback
-import queue
 import datetime
-from urllib.parse import urlparse
+#from urllib.parse import urlparse
+from urlparse import urlparse
 from threading import Lock, Thread
 from collections import defaultdict
 global PGCli, need_completion_refresh, need_search_path_refresh
@@ -34,6 +35,7 @@ import json
 import uuid
 import datetime
 import time
+str = unicode
 from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
                                 TRANSACTION_STATUS_ACTIVE,
                                 TRANSACTION_STATUS_INTRANS,
@@ -80,6 +82,12 @@ def remove_server(alias):
         json.dump(config, configfile)
 
 def connect_server(alias, authkey=None):
+    settings = {
+        'generate_aliases' : True,
+        'casing_file' : os.path.expanduser('~/.config/pgcli/casing'),
+        'generate_casing_file' : True
+        'single_connection': True
+    }
     server = next((s for (a, s) in serverList.items() if a == alias), None)
     if not server:
         return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
@@ -91,7 +99,7 @@ def connect_server(alias, authkey=None):
         completer = PGCompleter()
         executors[alias] = executor
         refresher.refresh(executor, special=special, callbacks=(
-                            lambda c: swap_completer(c, alias)))
+                            lambda c: swap_completer(c, alias)), settings=settings)
     except psycopg2.Error as e:
         return {'success':False, 'errormessage':str(e)}
     return {'alias': alias, 'success':True, 'errormessage':None}
@@ -136,7 +144,7 @@ def disconnect_server(alias):
             server['connected'] = False
             del executors[alias]
 
-def new_executor(url, pwd=None):
+def new_executor(url, pwd=None, settings=None):
     global password
     password = None
     uri = urlparse(url)
@@ -168,7 +176,7 @@ def get_transaction_status_text(status):
         TRANSACTION_STATUS_UNKNOWN: 'unknown'
     }[status]
 
-def run_sql(alias, sql, uuid, autocommit=True):
+def run_sql(alias, sql, uuid):
     for sql in sqlparse.split(sql):
         queryResults[uuid].append({
             'alias': alias,
@@ -189,8 +197,6 @@ def run_sql(alias, sql, uuid, autocommit=True):
         return
     with executor_lock:
         with executor.conn.cursor() as cur:
-            #if executor.conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
-                #executor.conn.autocommit = autocommit
             for n, qr in enumerate(queryResults[uuid]):
                 timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
@@ -226,19 +232,18 @@ app = Flask(__name__)
 def query():
     alias = request.form.get('alias', 'Vagrant')
     sql = request.form['query']
-    autocommit = request.form.get('autocommit', '1') == '1'
     uid = str(uuid.uuid1())
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(str(json.dumps(sstatus)), mimetype='text/json')
 
     t = Thread(target=run_sql,
-                   args=(alias, sql, uid, autocommit),
+                   args=(alias, sql, uid),
                    name='run_sql')
     t.setDaemon(True)
     t.start()
-    return Response(str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
-    #return'localhost:5000/result/' + uid
+    #return Response(str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
+    return'localhost:5000/result/' + uid
 @app.route("/result/<uuid>")
 def result(uuid):
     result = queryResults[uuid]
