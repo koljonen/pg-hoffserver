@@ -225,8 +225,7 @@ def query():
                    name='run_sql')
     t.setDaemon(True)
     t.start()
-    #return Response(str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
-    return'localhost:5000/result/' + uid
+    return Response(str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
 @app.route("/result/<uuid>")
 def result(uuid):
     result = queryResults[uuid]
