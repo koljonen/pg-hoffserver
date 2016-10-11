@@ -1,49 +1,32 @@
 from __future__ import unicode_literals
+import sys, os, site, traceback, logging, threading, json, uuid, datetime, time, psycopg2, sqlparse
 from flask import Flask, request, Response
-import logging
-import threading
-import sys
-import os
-import site
-import traceback
-import datetime
-#from urllib.parse import urlparse
-from urlparse import urlparse
 from threading import Lock, Thread
 from collections import defaultdict
+try:
+    from urlparse import urlparse
+except ImportError:
+    from urllib.parse import urlparse
+from pgcli.main import PGCli, has_meta_cmd, has_change_path_cmd
+from pgcli.pgexecute import PGExecute
+from pgcli.pgcompleter import PGCompleter
+from pgspecial import PGSpecial
+from pgcli.completion_refresher import CompletionRefresher
+from prompt_toolkit.document import Document
+from pgcli.main import format_output
 global PGCli, need_completion_refresh, need_search_path_refresh
 global has_meta_cmd, has_change_path_cmd
-from pgcli.main import PGCli, has_meta_cmd, has_change_path_cmd
-global PGExecute
-from pgcli.pgexecute import PGExecute
-global PGCompleter
-from pgcli.pgcompleter import PGCompleter
-global special
-from pgspecial import PGSpecial
+global psycopg2, sqlparse, PGExecute, PGCompleter, special, CompletionRefresher, format_output, Document
+global serverList
+if sys.version_info < (3,0):
+     str = unicode
 special = PGSpecial()
-global CompletionRefresher
-from pgcli.completion_refresher import CompletionRefresher
-global Document
-from prompt_toolkit.document import Document
-global format_output
-from pgcli.main import format_output
-global psycopg2
-import psycopg2
-global sqlparse
-import sqlparse
-import json
-import uuid
-import datetime
-import time
-str = unicode
 from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
                                 TRANSACTION_STATUS_ACTIVE,
                                 TRANSACTION_STATUS_INTRANS,
                                 TRANSACTION_STATUS_INERROR,
                                 TRANSACTION_STATUS_UNKNOWN)
 
-
-global serverList
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
 executors = defaultdict(list)  # Dict mapping buffer ids to pgexecutor objects
@@ -85,7 +68,7 @@ def connect_server(alias, authkey=None):
     settings = {
         'generate_aliases' : True,
         'casing_file' : os.path.expanduser('~/.config/pgcli/casing'),
-        'generate_casing_file' : True
+        'generate_casing_file' : True,
         'single_connection': True
     }
     server = next((s for (a, s) in serverList.items() if a == alias), None)
