@@ -29,6 +29,7 @@ dbSyncQueue = Queue()
 type_dict = defaultdict(dict)
 config = {}
 serverList = {}
+uuids_pending_execution = []
 executor_queues = defaultdict(lambda: Queue())
 db_name = 'hoff.db'
 
@@ -274,6 +275,7 @@ def executor_queue_worker(alias):
                     notices.append(executor.conn.notices.pop(0))
                 currentQuery['notices'] = notices
                 queryResults[uuid][n] = currentQuery
+                uuids_pending_execution.remove(uuid)
 
 def update_query_with_dynamic_tables(query):
     dynamic_tables = list_dynamic_tables()
@@ -314,8 +316,14 @@ def dict_factory(cursor, row):
 
 def fetch_result(uuid):
     result = queryResults[uuid]
-    if not result:
-        #look for result in db
+    if not result: #look in uuids_pending_execution list and wait up to 5 seconds
+        if uuid in uuids_pending_execution:
+            for x in range(1,500):
+                time.sleep(0.01)
+                result = queryResults[uuid]
+                if result:
+                    break
+    if not result: #look for result in db
         conn = sqlite3.connect(home_dir + '/' + db_name)
         conn.row_factory = dict_factory
         cur = conn.cursor()
@@ -405,6 +413,17 @@ def construct_dynamic_table(dynamic_table_name):
     sql = '(SELECT * FROM (VALUES(' + sql + ')) DT (' + ",".join(str(column['name']) for column in columnheaders) + '))'
     return sql
 
+def search_query_history(q, search_data=False):
+    conn = sqlite3.connect(home_dir + '/' + db_name)
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
+    cur.execute("""SELECT alias, uuid,
+        CASE WHEN LENGTH(query) > 50 THEN substr(query, 0, 50) || '...' ELSE query END as query,
+        runtime_seconds, datestamp as timestamp FROM QueryData WHERE query LIKE :q """
+        + ("OR rows LIKE :q;" if search_data else ";"), ({"q":'%' + q + '%'}))
+    result = cur.fetchall()
+    return result
+
 app = Flask(__name__)
 @app.route("/query", methods=['POST'])
 def app_query():
@@ -415,6 +434,7 @@ def app_query():
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
     queue_query(uid, alias, sql)
+    uuids_pending_execution.append(uid)
     return Response(to_str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
 
 @app.route("/result/<uuid>")
@@ -539,7 +559,16 @@ def app_list_dynamic_tables():
 @app.route("/export_dynamic_table", methods=['POST'])
 def app_export_dynamic_table():
     dynamic_table_name = request.form['dynamic_table_name']
-    return to_str(construct_dynamic_table(dynamic_table_name))
+    return Response(to_str(construct_dynamic_table(dynamic_table_name)), mimetype='text/json')
+
+@app.route("/search", methods=['POST'])
+def app_search():
+    q = request.form['q']
+    search_data = request.form.get('search_data') == 'True'
+    result = search_query_history(q, search_data)
+    if not result:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'No queries match the given search criteria.'})), mimetype='text/json')
+    return Response(to_str((json.dumps(result))), mimetype='text/json')
 
 if __name__ == "__main__":
     main()
