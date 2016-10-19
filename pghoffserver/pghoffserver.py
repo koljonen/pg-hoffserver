@@ -33,7 +33,7 @@ uuids_pending_execution = []
 executor_queues = defaultdict(lambda: Queue())
 db_name = 'hoff.db'
 
-def main(args=None):
+def main():
     global serverList
     global config
     if not os.path.exists(home_dir):
@@ -47,6 +47,7 @@ def main(args=None):
         config = dict()
         serverList = dict()
     init_db()
+    app.run()
 
 def init_db():
     sql = """CREATE TABLE IF NOT EXISTS QueryData(
@@ -181,6 +182,7 @@ def cancel_execution(alias):
         return {'success':False, 'errormessage':'Unknown alias.'}
     else:
         executors[alias].conn.cancel()
+        executors[alias].conn.rollback()
     return {'success':True, 'errormessage':None}
 
 def new_executor(url, pwd=None, settings=None):
@@ -424,6 +426,11 @@ def search_query_history(q, search_data=False):
     result = cur.fetchall()
     return result
 
+def get_meta_data(alias, name):
+    comps = completers[alias].get_completions(
+                Document(text='select * from bank', cursor_position=18), None)
+    print(comps, file=sys.stderr)
+
 app = Flask(__name__)
 @app.route("/query", methods=['POST'])
 def app_query():
@@ -490,7 +497,7 @@ def list_connections():
 @app.route("/connect", methods=['POST'])
 def app_connect():
     alias = request.form['alias']
-    authkey = request.form['authkey']
+    authkey = request.form.get('authkey')
     return Response(to_str(json.dumps(connect_server(alias, authkey))), mimetype='text/json')
 
 @app.route("/addserver", methods=['POST'])
@@ -570,6 +577,17 @@ def app_search():
         return Response(to_str(json.dumps({'success':False, 'errormessage':'No queries match the given search criteria.'})), mimetype='text/json')
     return Response(to_str((json.dumps(result))), mimetype='text/json')
 
+@app.route("/get_meta_data", methods=['POST'])
+def app_get_meta_data():
+    alias = request.form.get('alias')
+    name = request.form.get('name')
+    if alias not in serverList:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown alias.'})), mimetype='text/json')
+    if alias not in executors:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected.'})), mimetype='text/json')
+    if not name:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'No object specified.'})), mimetype='text/json')
+    return Response(to_str(get_meta_data(alias, name)), mimetype='text/json')
+
 if __name__ == "__main__":
     main()
-    app.run()
