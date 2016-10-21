@@ -1,6 +1,6 @@
 from __future__ import unicode_literals, print_function
 import sys, os, json, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re
-from flask import Flask, request, Response
+from flask import Flask, request, Response, render_template
 from threading import Lock, Thread
 from multiprocessing import Queue
 from Queue import Empty
@@ -420,10 +420,11 @@ def search_query_history(q, search_data=False):
     conn = sqlite3.connect(home_dir + '/' + db_name)
     conn.row_factory = dict_factory
     cur = conn.cursor()
-    cur.execute("""SELECT alias, uuid,
+    cur.execute("""SELECT alias,
         CASE WHEN LENGTH(query) > 50 THEN substr(query, 0, 50) || '...' ELSE query END as query,
-        runtime_seconds, datestamp as timestamp FROM QueryData WHERE query LIKE :q """
-        + ("OR rows LIKE :q;" if search_data else ";"), ({"q":'%' + q + '%'}))
+        runtime_seconds, datestamp as timestamp, uuid FROM QueryData WHERE query LIKE :q """
+        + (" OR rows LIKE :q" if search_data else "")
+        + " ORDER BY datestamp DESC;", ({"q":'%' + q + '%'}))
     result = cur.fetchall()
     return result
 
@@ -589,6 +590,10 @@ def app_get_meta_data():
     if not name:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'No object specified.'})), mimetype='text/json')
     return Response(to_str(get_meta_data(alias, name)), mimetype='text/json')
+
+@app.route('/')
+def site_main():
+    return render_template('history.html')
 
 if __name__ == "__main__":
     main()
