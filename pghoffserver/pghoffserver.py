@@ -73,7 +73,7 @@ def db_worker():
         uuid = q['uuid']
         for r in result:
             conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                (r['alias'], to_str(uuid), None, json.dumps(r['columns']), json.dumps(r['rows']),
+                (r['alias'], to_str(uuid), None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
                 r['query'], json.dumps(r['notices']),
                 r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
             conn.commit()
@@ -347,9 +347,9 @@ def fetch_result(uuid):
         if sync_to_db: #put result in queue for db-storage
             dbSyncQueue.put({'result': result, 'uuid':uuid})
             del queryResults[uuid]
-        return Response(to_str(json.dumps(result)), mimetype='text/json')
-    except Exception:
-        return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected.'})), mimetype='text/json')
+        return Response(to_str(json.dumps(result, default=str)), mimetype='text/json')
+    except Exception as e:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected.', 'actual_error' : str(e)})), mimetype='text/json')
 
 def create_dynamic_table(uuid, name):
     conn = sqlite3.connect(home_dir + '/' + db_name)
