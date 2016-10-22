@@ -1,5 +1,6 @@
 from __future__ import unicode_literals, print_function
-import sys, os, json, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re
+import sys, os, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re
+import simplejson as json
 from flask import Flask, request, Response, render_template
 from threading import Lock, Thread
 from multiprocessing import Queue
@@ -194,19 +195,6 @@ def new_executor(url, pwd=None, settings=None):
 def swap_completer(comp,alias):
     completers[alias] = comp
 
-def format_row(row):
-    encoder = json.JSONEncoder()
-    columns = []
-    for column in row:
-        if column is None:
-            columns.append(None)
-            continue
-        try:
-            columns.append(encoder.encode(column))
-        except TypeError:
-            columns.append(to_str(column))
-    return tuple(columns)
-
 def get_transaction_status_text(status):
     return {
         TRANSACTION_STATUS_IDLE: 'idle',
@@ -266,7 +254,7 @@ def executor_queue_worker(alias):
                 if cur.description:
                     currentQuery['columns'] = [{'name': d.name, 'type_code': d.type_code,
                                                 'type': type_dict[alias][d.type_code]} for d in cur.description]
-                    currentQuery['rows'] = [format_row(row) for row in cur.fetchall()]
+                    currentQuery['rows'] = list(cur.fetchall())
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
                 currentQuery['complete'] = True
