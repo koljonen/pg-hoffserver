@@ -37,6 +37,10 @@ db_name = 'hoff.db'
 def main():
     global serverList
     global config
+    # Stop psycopg2 from mangling intervals
+    psycopg2.extensions.register_type(psycopg2.extensions.new_type(
+        (1186,), str("intrvl"), lambda val, cur: val))
+
     if not os.path.exists(home_dir):
         os.makedirs(home_dir)
     try:
