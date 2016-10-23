@@ -269,7 +269,7 @@ def executor_queue_worker(alias):
                     notices.append(executor.conn.notices.pop(0))
                 currentQuery['notices'] = notices
                 queryResults[uuid][n] = currentQuery
-                uuids_pending_execution.remove(uuid)
+            uuids_pending_execution.remove(uuid)
 
 def update_query_with_dynamic_tables(query):
     dynamic_tables = list_dynamic_tables()
