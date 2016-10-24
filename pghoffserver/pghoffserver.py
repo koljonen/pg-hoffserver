@@ -433,8 +433,8 @@ def app_query():
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
-    queue_query(uid, alias, sql)
     uuids_pending_execution.append(uid)
+    queue_query(uid, alias, sql)
     return Response(to_str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
 
 @app.route("/result/<uuid>")
