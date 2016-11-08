@@ -10,6 +10,7 @@ from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
 from pgcli.completion_refresher import CompletionRefresher
 from prompt_toolkit.document import Document
+from itsdangerous import Serializer
 try:
     from urlparse import urlparse
 except ImportError:
@@ -38,12 +39,27 @@ db_name = 'hoff.db'
 def main():
     global serverList
     global config
+    global apikey
     # Stop psycopg2 from mangling intervals
     psycopg2.extensions.register_type(psycopg2.extensions.new_type(
         (1186,), str("intrvl"), lambda val, cur: val))
 
     if not os.path.exists(home_dir):
         os.makedirs(home_dir)
+    try:
+        with open(home_dir + '/.key', mode='r+') as api_key_file:
+            apikey = api_key_file.readLine()
+            if not apikey:
+                apikey = to_str(uuid.uuid1())
+                api_key_file.write(apikey)
+    except Exception:
+        try:
+            with open(home_dir + '/.key', mode='w') as api_key_file:
+                apikey = to_str(uuid.uuid1())
+                api_key_file.write(apikey)
+        except Exception as e:
+            print ('Error generating API-key ' + to_str(e))
+            sys.exit(0)
     try:
         with open(home_dir + '/config.json') as json_data_file:
             config = json.load(json_data_file)
@@ -57,7 +73,7 @@ def main():
 
 def init_db():
     sql = """CREATE TABLE IF NOT EXISTS QueryData(
-      alias text, uuid text, dynamic_table_name text, columns text, rows text,
+      alias text, batchid text, queryid text, dynamic_table_name text, columns text, rows text,
       query text, notices text, statusmessage text,
       runtime_seconds int, error text,
       datestamp timestamp
@@ -73,12 +89,10 @@ def init_db():
 def db_worker():
     conn = sqlite3.connect(home_dir + '/' + db_name)
     while True:
-        q = dbSyncQueue.get(block=True)
-        result = q['result']
-        uuid = q['uuid']
+        result = dbSyncQueue.get(block=True)
         for r in result:
-            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                (r['alias'], to_str(uuid), None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
+            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
                 r['query'], json.dumps(r['notices']),
                 r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
             conn.commit()
@@ -224,11 +238,13 @@ def executor_queue_worker(alias):
     while alias in serverList and serverList[alias].get('connected'):
         query = executor_queues[alias].get(block=True)
         sql = query['sql']
-        uuid = query['uuid']
+        uid = query['uuid']
 
         for sql in sqlparse.split(sql):
-            queryResults[uuid].append({
+            queryResults[uid].append({
                 'alias': alias,
+                'batchid': uid,
+                'queryid': to_str(uuid.uuid1()),
                 'columns': None,
                 'rows': None,
                 'query': sql,
@@ -243,12 +259,12 @@ def executor_queue_worker(alias):
                 'dynamic_alias': None
             })
         with executor.conn.cursor() as cur:
-            for n, qr in enumerate(queryResults[uuid]):
+            for n, qr in enumerate(queryResults[uid]):
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
-                currentQuery = queryResults[uuid][n]
+                currentQuery = queryResults[uid][n]
                 currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
                 currentQuery['executing'] = True
-                queryResults[uuid][n] = currentQuery
+                queryResults[uid][n] = currentQuery
                 #Check if there are any dynamic tables in the query
                 query = update_query_with_dynamic_tables(qr['query'])
                 #run query
@@ -269,8 +285,8 @@ def executor_queue_worker(alias):
                 while executor.conn.notices:
                     notices.append(executor.conn.notices.pop(0))
                 currentQuery['notices'] = notices
-                queryResults[uuid][n] = currentQuery
-            uuids_pending_execution.remove(uuid)
+                queryResults[uid][n] = currentQuery
+            uuids_pending_execution.remove(uid)
 
 def update_query_with_dynamic_tables(query):
     dynamic_tables = list_dynamic_tables()
@@ -322,11 +338,13 @@ def fetch_result(uuid):
         conn = sqlite3.connect(home_dir + '/' + db_name)
         conn.row_factory = dict_factory
         cur = conn.cursor()
-        cur.execute("SELECT * FROM QueryData WHERE uuid = ?", (to_str(uuid),))
-        row = cur.fetchone()
+        cur.execute("SELECT * FROM QueryData WHERE batchid = ?", (to_str(uuid),))
+        row = cur.fetchone() ##todo fetch whole batch of queries
         if row:
             result = {
                 'alias': row["alias"],
+                'batchid': row['batchid'],
+                'queryid': row['queryid'],
                 'columns': json.loads(row["columns"]),
                 'rows': json.loads(row["rows"]),
                 'query': row["query"],
@@ -350,15 +368,15 @@ def fetch_result(uuid):
                 r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
             r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
         if sync_to_db: #put result in queue for db-storage
-            dbSyncQueue.put({'result': result, 'uuid':uuid})
+            dbSyncQueue.put(result)
             del queryResults[uuid]
         return Response(to_str(json.dumps(result, default=str)), mimetype='text/json')
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected.', 'actual_error' : str(e)})), mimetype='text/json')
 
-def create_dynamic_table(uuid, name):
+def create_dynamic_table(queryid, name):
     conn = sqlite3.connect(home_dir + '/' + db_name)
-    conn.cursor().execute('UPDATE QueryData SET dynamic_table_name = ? WHERE uuid = ?;', (name, to_str(uuid)))
+    conn.cursor().execute('UPDATE QueryData SET dynamic_table_name = ? WHERE queryid = ?;', (name, to_str(queryid)))
     conn.commit()
     conn.close()
     return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
@@ -385,7 +403,7 @@ def list_dynamic_tables(alias = None):
     if alias:
         cur.execute('SELECT * FROM QueryData WHERE dynamic_table_name IS NOT NULL AND alias = ?;', (alias,))
     else:
-        cur.execute('SELECT alias, uuid, dynamic_table_name FROM QueryData WHERE dynamic_table_name IS NOT NULL;')
+        cur.execute('SELECT alias, batchid, queryid, dynamic_table_name FROM QueryData WHERE dynamic_table_name IS NOT NULL;')
     results = cur.fetchall()
     conn.close()
     return results
@@ -403,7 +421,7 @@ def construct_dynamic_table(dynamic_table_name):
     output = []
     sql = ''
     for row in rows:
-        output.append(",".join(str(column) for column in row))
+        output.append(",".join( (to_str(column) if column else to_str('NULL')) if header['type'] in ('integer', 'bigint', 'numeric', 'smallint') else ("'" + to_str(column) + "'" if column else to_str('NULL')) for column, header in zip(row, columnheaders)))
     sql += "),(".join(str(column) for column in output)
     sql = '(SELECT * FROM (VALUES(' + sql + ')) DT (' + ",".join(str(column['name']) for column in columnheaders) + '))'
     return sql
@@ -414,7 +432,7 @@ def search_query_history(q, search_data=False):
     cur = conn.cursor()
     cur.execute("""SELECT alias,
         CASE WHEN LENGTH(query) > 50 THEN substr(query, 0, 50) || '...' ELSE query END as query,
-        runtime_seconds, datestamp as timestamp, uuid FROM QueryData WHERE query LIKE :q """
+        runtime_seconds, datestamp as timestamp, batchid, queryid FROM QueryData WHERE query LIKE :q """
         + (" OR rows LIKE :q" if search_data else "")
         + " ORDER BY datestamp DESC;", ({"q":'%' + q + '%'}))
     result = cur.fetchall()
@@ -456,7 +474,7 @@ def app_executing():
             r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
             output.append(r)
         if sync_to_db:
-            dbSyncQueue.put({'result': queryResults[uuid], 'uuid':uuid})
+            dbSyncQueue.put(queryResults[uuid])
             uuid_delete.append(uuid)
     for uuid in uuid_delete:
         del queryResults[uuid]
@@ -534,9 +552,9 @@ def app_cancel():
 
 @app.route("/create_dynamic_table", methods=['POST'])
 def app_create_dynamic_table():
-    uuid = request.form['uuid']
+    queryid = request.form['queryid']
     name = request.form['name']
-    return create_dynamic_table(uuid, name)
+    return create_dynamic_table(queryid, name)
 
 @app.route("/delete_dynamic_table", methods=['POST'])
 def app_delete_dynamic_table():
@@ -544,7 +562,7 @@ def app_delete_dynamic_table():
     return delete_dynamic_table(uuid, None)
 
 @app.route("/delete_dynamic_tables", methods=['POST'])
-def app_create_dynamic_tables():
+def app_delete_dynamic_tables():
     alias = request.form.get('alias')
     return delete_dynamic_table(None, alias)
 
@@ -553,14 +571,14 @@ def app_list_dynamic_tables():
     alias = request.form.get('alias')
     dynamic_tables =  list_dynamic_tables(alias)
     if dynamic_tables:
-        Response(to_str(json.dumps(dynamic_tables)), mimetype='text/json')
+        return Response(to_str(json.dumps(dynamic_tables)), mimetype='text/json')
     else:
-        Response(to_str(json.dumps(None)), mimetype='text/json')
+        return Response(to_str(json.dumps(None)), mimetype='text/json')
 
 @app.route("/export_dynamic_table", methods=['POST'])
 def app_export_dynamic_table():
-    dynamic_table_name = request.form['dynamic_table_name']
-    return Response(to_str(construct_dynamic_table(dynamic_table_name)), mimetype='text/json')
+    name = request.form['name']
+    return Response(to_str(construct_dynamic_table(name)), mimetype='text')
 
 @app.route("/search", methods=['POST'])
 def app_search():
