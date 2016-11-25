@@ -258,6 +258,7 @@ def executor_queue_worker(alias):
                 'dynamic_alias': None
             })
         with executor.conn.cursor() as cur:
+            completer = completers[alias]
             for n, qr in enumerate(queryResults[uid]):
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
                 currentQuery = queryResults[uid][n]
@@ -272,7 +273,7 @@ def executor_queue_worker(alias):
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
                 if cur.description:
-                    currentQuery['columns'] = [{'name': d.name, 'type_code': d.type_code,
+                    currentQuery['columns'] = [{'name': completer.case(d.name), 'type_code': d.type_code,
                                                 'type': type_dict[alias][d.type_code]} for d in cur.description]
                     currentQuery['rows'] = list(cur.fetchall())
                 #update query result
