@@ -130,7 +130,8 @@ def connect_server(alias, authkey=None):
     refresher = CompletionRefresher()
     try:
         with executor_lock:
-            executor = new_executor(server['url'], authkey)
+            dsn = server.get('dsn')
+            executor = new_executor(server['url'], dsn, authkey)
             with executor.conn.cursor() as cur:
                 cur.execute('SELECT oid, oid::regtype::text FROM pg_type')
                 type_dict[alias] = dict(row for row in cur.fetchall())
@@ -204,10 +205,9 @@ def cancel_execution(alias):
         executors[alias].conn.rollback()
     return {'success':True, 'errormessage':None}
 
-def new_executor(url, pwd=None, settings=None):
+def new_executor(url, dsn=None, pwd=None, settings=None):
     uri = urlparse(url)
     database = uri.path[1:]  # ignore the leading fwd slash
-    dsn = None  # todo: what is this for again
     return PGExecute(database, uri.username, pwd or uri.password, uri.hostname, uri.port, dsn)
 
 def swap_completer(comp,alias):
