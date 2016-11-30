@@ -9,7 +9,6 @@ from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
 from pgcli.completion_refresher import CompletionRefresher
 from prompt_toolkit.document import Document
-from itsdangerous import Serializer
 try:
     from urlparse import urlparse
 except ImportError:
@@ -31,8 +30,9 @@ dbSyncQueue = Queue()
 type_dict = defaultdict(dict)
 config = {}
 serverList = {}
-executor_queues = defaultdict(lambda: Queue())
+executor_queues = defaultdict(Queue)
 db_name = 'hoff.db'
+apikey = None
 
 def main():
     global serverList
@@ -454,16 +454,14 @@ def app_result(queryid):
 def app_executing():
     output = []
     uuid_delete = []
-    for n, uuid in enumerate(queryResults):
-        sync_to_db = True
-        for n, r in enumerate(queryResults[uuid]):
-            if r['executing']:
-                sync_to_db = False
-                timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
-                r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-            r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
-            output.append(r)
-        if sync_to_db:
+    for uuid in queryResults:
+        r = queryResults[uuid]
+        if r['executing']:
+            timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
+            r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+        r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
+        output.append(r)
+        if r['complete']:
             dbSyncQueue.put(queryResults[uuid])
             uuid_delete.append(uuid)
     for uuid in uuid_delete:
