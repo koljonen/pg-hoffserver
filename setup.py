@@ -2,7 +2,7 @@ from setuptools import setup
 
 install_requirements = [
   'Flask==0.11.1',
-  'pgcli==1.2.0',
+  'pgcli>=1.2.0',
   'psycopg2==2.6.2',
   'simplejson>=2.1'
 ]
