@@ -290,9 +290,10 @@ def executor_queue_worker(alias):
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
                 if cur.description:
-                    currentQuery['columns'] = [{'name': completer.case(d.name), 'type_code': d.type_code,
-                                                'type': type_dict[alias][d.type_code]} for d in cur.description]
-                    currentQuery['rows'] = list(cur.fetchall())
+                    x = 0
+                    columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
+                    currentQuery['columns'] = columns
+                    currentQuery['rows'] = [{str(header):column for header, column in zip([completer.case(d["field"]) for d in columns], x)} for x in list(cur.fetchall())]
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
                 currentQuery['complete'] = True
