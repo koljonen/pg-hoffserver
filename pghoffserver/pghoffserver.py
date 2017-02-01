@@ -23,6 +23,7 @@ from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
 home_dir = os.path.expanduser('~/.pghoffserver')
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
+completerSettings = defaultdict(list)
 executors = defaultdict(list)  # Dict mapping buffer ids to pgexecutor objects
 executor_lock = Lock()
 bufferConnections = defaultdict(str) #Dict mapping bufferids to connectionstrings
@@ -64,7 +65,8 @@ def main():
             config = json.load(json_data_file)
             #Todo: load PGCLI using site-dirs from config file.
             serverList = config['connections']
-    except Exception:
+            completerSettings = dict([ (a, c.get('completer_settings')) for (a, c) in config['connections'].items()])
+    except Exception as e:
         config = dict()
         serverList = dict()
     init_db()
@@ -101,27 +103,30 @@ def to_str(string):
          return unicode(string)
     return str(string)
 
+def write_config():
+    with open(home_dir + '/config.json', mode='w') as configfile:
+        json.dump(config, configfile)
+
 def new_server(alias, url, requiresauthkey):
     serverList[alias] = {'url':url, 'requiresauthkey':requiresauthkey}
     config['connections'] = serverList
-    with open(home_dir + '/config.json', mode='w') as configfile:
-        json.dump(config, configfile)
+    write_config()
 
 def remove_server(alias):
     if config['connections'].get(alias):
         del config['connections'][alias]
     if serverList.get(alias):
         del serverList[alias]
-    with open(home_dir + 'config.json', mode='w', encoding='utf-8') as configfile:
-        json.dump(config, configfile)
+    write_config()
 
 def connect_server(alias, authkey=None):
-    settings = {
+    defaultSettings = {
         'generate_aliases' : True,
         'casing_file' : os.path.expanduser('~/.config/pgcli/casing'),
         'generate_casing_file' : True,
         'single_connection': True
     }
+    completerSettings[alias] = completerSettings.get(alias, defaultSettings)
     server = serverList.get(alias, None)
     if not server:
         return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
@@ -137,7 +142,7 @@ def connect_server(alias, authkey=None):
                 type_dict[alias] = dict(row for row in cur.fetchall())
             executors[alias] = executor
             refresher.refresh(executor, special=special, callbacks=(
-                                lambda c: swap_completer(c, alias)), settings=settings)
+                              lambda c: swap_completer(c, alias)), settings=completerSettings[alias])
             serverList[alias]['connected'] = True
     except psycopg2.Error as e:
         return {'success':False, 'errormessage':to_str(e)}
@@ -151,6 +156,13 @@ def connect_server(alias, authkey=None):
     t.start()
 
     return {'alias': alias, 'success':True, 'errormessage':None}
+
+def update_completer_settings(alias, new_settings):
+    if new_settings != completerSettings[alias]:
+        completerSettings[alias].update(new_settings)
+        refresher = CompletionRefresher()
+        refresher.refresh(executors[alias], special=special, callbacks=(
+                                        lambda c: swap_completer(c, alias, True)), settings=completerSettings[alias])
 
 def refresh_servers():
     with executor_lock:
@@ -210,8 +222,13 @@ def new_executor(url, dsn=None, pwd=None, settings=None):
     database = uri.path[1:]  # ignore the leading fwd slash
     return PGExecute(database, uri.username, pwd or uri.password, uri.hostname, uri.port, dsn)
 
-def swap_completer(comp,alias):
+def swap_completer(comp ,alias, save_settings = False):
     completers[alias] = comp
+    if save_settings:
+        for k, v in serverList.items():
+            #v.setdefault('completer_settings', completerSettings[k])
+            v['completer_settings'] = completerSettings[k]
+        write_config()
 
 def get_transaction_status_text(status):
     return {
@@ -298,8 +315,6 @@ def update_query_with_dynamic_tables(query):
     return query
 
 def get_word(text, position):
-    #print(text, file=sys.stderr)
-    #print(position, file=sys.stderr)
     index = text.rfind("##", 0, int(position))
     if index > -1:
         return text[index + 1:int(position)]
@@ -600,6 +615,25 @@ def app_get_meta_data():
     if not name:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'No object specified.'})), mimetype='text/json')
     return Response(to_str(get_meta_data(alias, name)), mimetype='text/json')
+
+@app.route("/get_settings", methods=['POST'])
+def app_get_completer_settings():
+    alias = request.form.get('alias')
+    return Response(to_str(json.dumps(completerSettings[alias])), mimetype='text/json')
+
+@app.route("/update_settings", methods=['POST'])
+def app_update_completer_settings():
+    alias = request.form.get('alias')
+    settings = request.form.get('settings')
+    try:
+        settings = json.loads(settings)
+    except:
+        return Response(to_str(json.dumps({'success':False, 'errormessage': 'Unknown settings.'})), mimetype='text/json')
+    try:
+        update_completer_settings(alias, settings)
+    except Exception as e:
+        return Response(to_str(json.dumps({'success':False, 'errormessage': 'Not connected.'})), mimetype='text/json')
+    return Response(to_str(json.dumps({'success':True, 'errormessage': None})), mimetype='text/json')
 
 @app.route('/')
 def site_main():
