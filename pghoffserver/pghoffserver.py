@@ -276,36 +276,35 @@ def executor_queue_worker(alias):
     while alias in serverList and serverList[alias].get('connected'):
         queue = executor_queues[alias].get(block=True)
         uid = queue['uuid']
-
-    with executor.conn.cursor() as cur:
-        completer = completers[alias]
-        timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
-        currentQuery = queryResults[uid]
-        currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
-        currentQuery['executing'] = True
-        queryResults[uid] = currentQuery
-        #Check if there are any dynamic tables in the query
-        query = update_query_with_dynamic_tables(queryResults[uid]['query'])
-        #run query
-        try:
-            cur.execute(query)
-        except psycopg2.Error as e:
-            currentQuery['error'] = to_str(e)
-        if cur.description:
+        with executor.conn.cursor() as cur:
+            completer = completers[alias]
+            timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
+            currentQuery = queryResults[uid]
+            currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
+            currentQuery['executing'] = True
+            queryResults[uid] = currentQuery
+            #Check if there are any dynamic tables in the query
+            query = update_query_with_dynamic_tables(queryResults[uid]['query'])
+            #run query
+            try:
+                cur.execute(query)
+            except psycopg2.Error as e:
+                currentQuery['error'] = to_str(e)
+            if cur.description:
                 x = 0
                 columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
                 currentQuery['columns'] = columns
                 currentQuery['rows'] = [{str(header):column for header, column in zip([completer.case(d["field"]) for d in columns], x)} for x in list(cur.fetchall())]
-        #update query result
-        currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-        currentQuery['complete'] = True
-        currentQuery['executing'] = False
-        currentQuery['statusmessage'] = cur.statusmessage
-        notices = []
-        while executor.conn.notices:
-            notices.append(executor.conn.notices.pop(0))
-        currentQuery['notices'] = notices
-        queryResults[uid] = currentQuery
+            #update query result
+            currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+            currentQuery['complete'] = True
+            currentQuery['executing'] = False
+            currentQuery['statusmessage'] = cur.statusmessage
+            notices = []
+            while executor.conn.notices:
+                notices.append(executor.conn.notices.pop(0))
+            currentQuery['notices'] = notices
+            queryResults[uid] = currentQuery
 
 def update_query_with_dynamic_tables(query):
     dynamic_tables = list_dynamic_tables()
