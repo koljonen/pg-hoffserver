@@ -90,13 +90,12 @@ def init_db():
 def db_worker():
     conn = sqlite3.connect(home_dir + '/' + db_name)
     while True:
-        result = dbSyncQueue.get(block=True)
-        for r in result:
-            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
-                r['query'], json.dumps(r['notices']),
-                r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
-            conn.commit()
+        r = dbSyncQueue.get(block=True)
+        conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
+            r['query'], json.dumps(r['notices']),
+            r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
+        conn.commit()
 
 def to_str(string):
     if sys.version_info < (3,0):
@@ -239,8 +238,31 @@ def get_transaction_status_text(status):
         TRANSACTION_STATUS_UNKNOWN: 'unknown'
     }[status]
 
-def queue_query(uuid, alias, sql):
-    executor_queues[alias].put({'sql': sql, 'uuid': uuid})
+def queue_query(alias, sql):
+    queryids = []
+    batchid = to_str(uuid.uuid1())
+    for sql in sqlparse.split(sql):
+        queryid = to_str(uuid.uuid1())
+        queryResults[queryid] = {
+            'alias': alias,
+            'batchid': batchid,
+            'queryid': queryid,
+            'columns': None,
+            'rows': None,
+            'query': sql,
+            'notices': None,
+            'statusmessage': None,
+            'complete': False,
+            'executing': False,
+            'timestamp': None,
+            'runtime_seconds': None,
+            'error':None,
+            'transaction_status':None,
+            'dynamic_alias': None
+        }
+        executor_queues[alias].put({'uuid': queryid})
+        queryids.append(queryid)
+    return queryids
 
 def executor_queue_worker(alias):
     executor = executors[alias]
@@ -252,59 +274,38 @@ def executor_queue_worker(alias):
         time.sleep(2)
     #pick up work from queue
     while alias in serverList and serverList[alias].get('connected'):
-        query = executor_queues[alias].get(block=True)
-        sql = query['sql']
-        uid = query['uuid']
+        queue = executor_queues[alias].get(block=True)
+        uid = queue['uuid']
 
-        for sql in sqlparse.split(sql):
-            queryResults[uid].append({
-                'alias': alias,
-                'batchid': uid,
-                'queryid': to_str(uuid.uuid1()),
-                'columns': None,
-                'rows': None,
-                'query': sql,
-                'notices': None,
-                'statusmessage': None,
-                'complete': False,
-                'executing': False,
-                'timestamp': None,
-                'runtime_seconds': None,
-                'error':None,
-                'transaction_status':None,
-                'dynamic_alias': None
-            })
-        with executor.conn.cursor() as cur:
-            completer = completers[alias]
-            for n, qr in enumerate(queryResults[uid]):
-                timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
-                currentQuery = queryResults[uid][n]
-                currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
-                currentQuery['executing'] = True
-                queryResults[uid][n] = currentQuery
-                #Check if there are any dynamic tables in the query
-                query = update_query_with_dynamic_tables(qr['query'])
-                #run query
-                try:
-                    cur.execute(query)
-                except psycopg2.Error as e:
-                    currentQuery['error'] = to_str(e)
-                if cur.description:
-                    x = 0
-                    columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
-                    currentQuery['columns'] = columns
-                    currentQuery['rows'] = [{str(header):column for header, column in zip([completer.case(d["field"]) for d in columns], x)} for x in list(cur.fetchall())]
-                #update query result
-                currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-                currentQuery['complete'] = True
-                currentQuery['executing'] = False
-                currentQuery['statusmessage'] = cur.statusmessage
-                notices = []
-                while executor.conn.notices:
-                    notices.append(executor.conn.notices.pop(0))
-                currentQuery['notices'] = notices
-                queryResults[uid][n] = currentQuery
-            uuids_pending_execution.remove(uid)
+    with executor.conn.cursor() as cur:
+        completer = completers[alias]
+        timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
+        currentQuery = queryResults[uid]
+        currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        currentQuery['executing'] = True
+        queryResults[uid] = currentQuery
+        #Check if there are any dynamic tables in the query
+        query = update_query_with_dynamic_tables(queryResults[uid]['query'])
+        #run query
+        try:
+            cur.execute(query)
+        except psycopg2.Error as e:
+            currentQuery['error'] = to_str(e)
+        if cur.description:
+                x = 0
+                columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
+                currentQuery['columns'] = columns
+                currentQuery['rows'] = [{str(header):column for header, column in zip([completer.case(d["field"]) for d in columns], x)} for x in list(cur.fetchall())]
+        #update query result
+        currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+        currentQuery['complete'] = True
+        currentQuery['executing'] = False
+        currentQuery['statusmessage'] = cur.statusmessage
+        notices = []
+        while executor.conn.notices:
+            notices.append(executor.conn.notices.pop(0))
+        currentQuery['notices'] = notices
+        queryResults[uid] = currentQuery
 
 def update_query_with_dynamic_tables(query):
     dynamic_tables = list_dynamic_tables()
@@ -343,19 +344,12 @@ def dict_factory(cursor, row):
 
 def fetch_result(uuid):
     result = queryResults[uuid]
-    if not result: #look in uuids_pending_execution list and wait up to 5 seconds
-        if uuid in uuids_pending_execution:
-            for x in range(1,500):
-                time.sleep(0.01)
-                result = queryResults[uuid]
-                if result:
-                    break
     if not result: #look for result in db
         conn = sqlite3.connect(home_dir + '/' + db_name)
         conn.row_factory = dict_factory
         cur = conn.cursor()
-        cur.execute("SELECT * FROM QueryData WHERE batchid = ?", (to_str(uuid),))
-        row = cur.fetchone() ##todo fetch whole batch of queries
+        cur.execute("SELECT * FROM QueryData WHERE queryid = ?", (to_str(uuid),))
+        row = cur.fetchone()
         if row:
             result = {
                 'alias': row["alias"],
@@ -366,7 +360,7 @@ def fetch_result(uuid):
                 'query': row["query"],
                 'notices': json.loads(row["notices"]),
                 'statusmessage': row["statusmessage"],
-                'complete': 'lolz',
+                'complete': True,
                 'executing': False,
                 'timestamp': row["datestamp"],
                 'runtime_seconds': row["runtime_seconds"],
@@ -374,16 +368,13 @@ def fetch_result(uuid):
             }
             return Response(to_str(json.dumps(result)), mimetype='text/json')
         else:
-            return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown uuid.'})), mimetype='text/json')
+            return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown queryid.'})), mimetype='text/json')
     try:
-        sync_to_db = True
-        for r in result:
-            if r['executing'] == True:
-                sync_to_db = False
-                timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
-                r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-            r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
-        if sync_to_db: #put result in queue for db-storage
+        if result['executing'] == True:
+            timestamp_ts = time.mktime(datetime.datetime.strptime(result["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
+            result["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+        result['transaction_status'] = get_transaction_status_text(executors[result['alias']].conn.get_transaction_status())
+        if result['complete'] == True: #put result in queue for db-storage
             dbSyncQueue.put(result)
             del queryResults[uuid]
         return Response(to_str(json.dumps(result, default=str)), mimetype='text/json')
@@ -464,13 +455,14 @@ app = Flask(__name__)
 def app_query():
     alias = request.form.get('alias', 'Vagrant')
     sql = request.form['query']
-    uid = to_str(uuid.uuid1())
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
-    uuids_pending_execution.append(uid)
-    queue_query(uid, alias, sql)
-    return Response(to_str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
+    queryids = queue_query(alias, sql)
+    urls = []
+    for qid in queryids:
+        urls.append('localhost:5000/result/' + qid)
+    return Response(to_str(json.dumps({'success':True, 'queryids':queryids, 'Urls':urls, 'errormessage':None})), mimetype='text/json')
 
 @app.route("/result/<uuid>")
 def app_result(uuid):
@@ -480,16 +472,14 @@ def app_result(uuid):
 def app_executing():
     output = []
     uuid_delete = []
-    for n, uuid in enumerate(queryResults):
-        sync_to_db = True
-        for n, r in enumerate(queryResults[uuid]):
-            if r['executing']:
-                sync_to_db = False
-                timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
-                r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-            r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
-            output.append(r)
-        if sync_to_db:
+    for uuid in queryResults:
+        r = queryResults[uuid]
+        if r['executing']:
+            timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
+            r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+        r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
+        output.append(r)
+        if r['complete']:
             dbSyncQueue.put(queryResults[uuid])
             uuid_delete.append(uuid)
     for uuid in uuid_delete:
