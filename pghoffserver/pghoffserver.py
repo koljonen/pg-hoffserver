@@ -363,6 +363,7 @@ def fetch_result(uuid):
                 'executing': False,
                 'timestamp': row["datestamp"],
                 'runtime_seconds': row["runtime_seconds"],
+                'transaction_status': get_transaction_status_text(executors[result['alias']].conn.get_transaction_status()),
                 'error': row["error"]
             }
             return Response(to_str(json.dumps(result)), mimetype='text/json')
