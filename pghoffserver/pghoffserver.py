@@ -5,6 +5,7 @@ from flask import Flask, request, Response, render_template
 from threading import Lock, Thread
 from multiprocessing import Queue
 from collections import defaultdict
+from collections import OrderedDict
 from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
 from pgcli.completion_refresher import CompletionRefresher
@@ -62,7 +63,7 @@ def main():
             sys.exit(0)
     try:
         with open(home_dir + '/config.json') as json_data_file:
-            config = json.load(json_data_file)
+            config = json.load(json_data_file, object_pairs_hook=OrderedDict)
             #Todo: load PGCLI using site-dirs from config file.
             serverList = config['connections']
             completerSettings = dict([ (a, c.get('completer_settings')) for (a, c) in config['connections'].items()])
