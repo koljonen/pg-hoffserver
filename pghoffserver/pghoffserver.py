@@ -20,7 +20,11 @@ from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
                                 TRANSACTION_STATUS_ACTIVE,
                                 TRANSACTION_STATUS_INTRANS,
                                 TRANSACTION_STATUS_INERROR,
-                                TRANSACTION_STATUS_UNKNOWN)
+                                TRANSACTION_STATUS_UNKNOWN,
+                                STATUS_READY,
+                                STATUS_IN_TRANSACTION,
+                                STATUS_PREPARED)
+
 home_dir = os.path.expanduser('~/.pghoffserver')
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
@@ -147,6 +151,17 @@ def connect_server(alias, authkey=None):
     except psycopg2.Error as e:
         return {'success':False, 'errormessage':to_str(e)}
 
+    #wait for connection to be established
+    sleep = 0
+    while True:
+        time.sleep(0.01)
+        sleep += 0.01
+        if sleep >= 5:
+            return {'alias': alias, 'success':False, 'errormessage':'Connection timed out.'}
+        elif executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE and executors[alias].conn.status == STATUS_READY:
+            time.sleep(0.5)
+            break;
+
     #create a queue for this alias and start a worker thread
     executor_queues[alias] = Queue()
     t = Thread(target=executor_queue_worker,
@@ -220,7 +235,6 @@ def cancel_execution(alias):
                 r['executing'] = False
                 r['complete'] = True
         while not executor_queues[alias].empty():
-            print('popping queue')
             executor_queues[alias].get(block=False)
         executors[alias].conn.cancel()
         executors[alias].conn.rollback()
@@ -248,6 +262,7 @@ def get_transaction_status_text(status):
         TRANSACTION_STATUS_INERROR: 'inerror',
         TRANSACTION_STATUS_UNKNOWN: 'unknown'
     }[status]
+
 
 def queue_query(alias, sql):
     queryids = []
@@ -478,6 +493,8 @@ def app_query():
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
+    if not executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Already executing query'})), mimetype='text/json')
     queryids = queue_query(alias, sql)
     urls = []
     for qid in queryids:
