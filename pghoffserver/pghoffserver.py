@@ -213,8 +213,18 @@ def cancel_execution(alias):
     if not server:
         return {'success':False, 'errormessage':'Unknown alias.'}
     else:
+        for uuid in queryResults:
+            r = queryResults[uuid]
+            if r['alias'] == alias:
+                r['error'] = 'canceling statement due to user request'
+                r['executing'] = False
+                r['complete'] = True
+        while not executor_queues[alias].empty():
+            print('popping queue')
+            executor_queues[alias].get(block=False)
         executors[alias].conn.cancel()
         executors[alias].conn.rollback()
+
     return {'success':True, 'errormessage':None}
 
 def new_executor(url, dsn=None, pwd=None, settings=None):
@@ -356,6 +366,10 @@ def fetch_result(uuid):
         cur.execute("SELECT * FROM QueryData WHERE queryid = ?", (to_str(uuid),))
         row = cur.fetchone()
         if row:
+            try:
+                transactiontext = get_transaction_status_text(executors[row['alias']].conn.get_transaction_status())
+            except:
+                transactiontext = None
             result = {
                 'alias': row["alias"],
                 'batchid': row['batchid'],
@@ -369,7 +383,7 @@ def fetch_result(uuid):
                 'executing': False,
                 'timestamp': row["datestamp"],
                 'runtime_seconds': row["runtime_seconds"],
-                'transaction_status': get_transaction_status_text(executors[result['alias']].conn.get_transaction_status()),
+                'transaction_status': transactiontext,
                 'error': row["error"]
             }
             return Response(to_str(json.dumps(result)), mimetype='text/json')
@@ -444,7 +458,7 @@ def search_query_history(q, search_data=False):
     conn.row_factory = dict_factory
     cur = conn.cursor()
     cur.execute("""SELECT alias,
-        CASE WHEN LENGTH(query) > 50 THEN substr(query, 0, 50) || '...' ELSE query END as query,
+        query,
         runtime_seconds, datestamp as timestamp, batchid, queryid FROM QueryData WHERE query LIKE :q """
         + (" OR rows LIKE :q" if search_data else "")
         + " ORDER BY datestamp DESC;", ({"q":'%' + q + '%'}))
