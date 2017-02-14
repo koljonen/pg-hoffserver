@@ -647,6 +647,9 @@ def app_export_dynamic_table():
 @app.route("/refresh_definitions", methods=['POST'])
 def app_refresh_completer():
     alias = request.form.get('alias')
+    sstatus = server_status(alias)
+    if not sstatus['success']:
+        return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
     return refresh_completer(alias)
 
 @app.route("/search", methods=['POST'])
