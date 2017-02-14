@@ -86,6 +86,14 @@ def init_db():
     )"""
     conn = sqlite3.connect(home_dir + '/' + db_name)
     conn.execute(sql)
+    sql = """CREATE TABLE IF NOT EXISTS CellOperations(
+      name text, colloperationcell text, celloperationtype, query text
+    )"""
+    conn.execute(sql)
+    sql = """CREATE TABLE IF NOT EXISTS CellOperationChecks(
+      celloperationcell text, checkname text, validationcell text,
+      comparisoncell text, comparisonvalue text, operator text
+    )"""
     conn.close()
     t = Thread(target=db_worker,
                    name='db_worker')
@@ -263,6 +271,18 @@ def get_transaction_status_text(status):
         TRANSACTION_STATUS_UNKNOWN: 'unknown'
     }[status]
 
+def refresh_metadata(alias, cur):
+    cur.execute('SELECT oid, oid::regtype::text FROM pg_type')
+    type_dict[alias] = dict(row for row in cur.fetchall())
+
+def refresh_completer(alias):
+    try:
+        refresher = CompletionRefresher()
+        refresher.refresh(executors[alias], special=special, callbacks=(
+                                lambda c: swap_completer(c, alias)), settings=completerSettings[alias])
+        return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+    except:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Could not refresh metadata.'})), mimetype='text/json')
 
 def queue_query(alias, sql):
     queryids = []
@@ -305,6 +325,7 @@ def executor_queue_worker(alias):
         try:
             with executor.conn.cursor() as cur:
                 completer = completers[alias]
+                refresh_metadata(alias, cur)
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
                 currentQuery = queryResults[uid]
                 currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -622,6 +643,11 @@ def app_list_dynamic_tables():
 def app_export_dynamic_table():
     name = request.form['name']
     return Response(to_str(construct_dynamic_table(name)), mimetype='text')
+
+@app.route("/refresh_definitions", methods=['POST'])
+def app_refresh_completer():
+    alias = request.form.get('alias')
+    return refresh_completer(alias)
 
 @app.route("/search", methods=['POST'])
 def app_search():
