@@ -365,6 +365,7 @@ def update_query_with_dynamic_tables(query):
     for x in dynamic_tables:
         if '##' + x['dynamic_table_name'] in query:
             query = query.replace('##' + x['dynamic_table_name'], construct_dynamic_table(x['dynamic_table_name']))
+    print(query)
     return query
 
 def get_word(text, position):
@@ -484,7 +485,16 @@ def construct_dynamic_table(dynamic_table_name):
     output = []
     sql = ''
     for row in rows:
-        output.append(",".join( (to_str(column) if column else to_str('NULL')) if header['type'] in ('integer', 'bigint', 'numeric', 'smallint') else ("'" + to_str(column) + "'" if column else to_str('NULL')) for column, header in zip(row, columnheaders)))
+        values = []
+        for header in columnheaders:
+            if row[header['field']]:
+                if header['type'] in ('integer', 'bigint', 'numeric', 'smallint'):
+                    values.append(to_str(row[header['field']]))
+                else:
+                    values.append("'" + to_str(row[header['field']]) + "'")
+            else:
+                values.append('NULL')
+        output.append(','.join(values))
     sql += "),(".join(str(column) for column in output)
     sql = '(SELECT * FROM (VALUES(' + sql + ')) DT (' + ",".join(str(column['name']) for column in columnheaders) + '))'
     return sql
