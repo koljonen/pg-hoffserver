@@ -365,7 +365,6 @@ def update_query_with_dynamic_tables(query):
     for x in dynamic_tables:
         if '##' + x['dynamic_table_name'] in query:
             query = query.replace('##' + x['dynamic_table_name'], construct_dynamic_table(x['dynamic_table_name']))
-    print(query)
     return query
 
 def get_word(text, position):
