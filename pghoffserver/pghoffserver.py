@@ -75,7 +75,6 @@ def main():
         config = dict()
         serverList = dict()
     init_db()
-    app.run()
 
 def init_db():
     sql = """CREATE TABLE IF NOT EXISTS QueryData(
@@ -705,5 +704,5 @@ def app_update_completer_settings():
 def site_main():
     return render_template('history.html')
 
-if __name__ == "__main__":
-    main()
+#init server
+main()
