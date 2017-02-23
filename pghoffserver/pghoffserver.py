@@ -38,6 +38,7 @@ type_dict = defaultdict(dict)
 config = {}
 serverList = {}
 uuids_pending_execution = []
+result_cache = defaultdict(list)
 executor_queues = defaultdict(lambda: Queue())
 db_name = 'hoff.db'
 
@@ -75,6 +76,11 @@ def main():
         config = dict()
         serverList = dict()
     init_db()
+    #start cleanup worker
+    t = Thread(target=cleanup_worker,
+                   name='cleanup_worker')
+    t.setDaemon(True)
+    t.start()
 
 def init_db():
     sql = """CREATE TABLE IF NOT EXISTS QueryData(
@@ -108,6 +114,15 @@ def db_worker():
             r['query'], json.dumps(r['notices']),
             r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
         conn.commit()
+
+def cleanup_worker():
+    while True:
+        time.sleep(10)
+        toremove = []
+        for (uuid, cache) in [(uuid, cache) for (uuid, cache) in result_cache.items() if time.time() - cache['time'] >= 10]:
+            if cache['save_to_disk']:
+                dbSyncQueue.put(cache['result'], block=False)
+            del result_cache[uuid]
 
 def to_str(string):
     if sys.version_info < (3,0):
@@ -393,8 +408,8 @@ def dict_factory(cursor, row):
         d[col[0]] = row[idx]
     return d
 
-def fetch_result(uuid):
-    result = queryResults[uuid]
+def fetch_result(uuid, rows_from=None, rows_to=None):
+    result = queryResults[uuid] or result_cache and result_cache[uuid]['result']
     if not result: #look for result in db
         conn = sqlite3.connect(home_dir + '/' + db_name)
         conn.row_factory = dict_factory
@@ -406,12 +421,13 @@ def fetch_result(uuid):
                 transactiontext = get_transaction_status_text(executors[row['alias']].conn.get_transaction_status())
             except:
                 transactiontext = None
+            rowdata = json.loads(row["rows"])
             result = {
                 'alias': row["alias"],
                 'batchid': row['batchid'],
                 'queryid': row['queryid'],
                 'columns': json.loads(row["columns"]),
-                'rows': json.loads(row["rows"]),
+                'rows': rowdata,
                 'query': row["query"],
                 'notices': json.loads(row["notices"]),
                 'statusmessage': row["statusmessage"],
@@ -422,6 +438,10 @@ def fetch_result(uuid):
                 'transaction_status': transactiontext,
                 'error': row["error"]
             }
+            if rows_from and rows_to:
+                result_cache[uuid] = {'time': time.time(), 'save_to_disk': False, 'result': result}
+                rowdata = rowdata[min([int(rows_from), len(rowdata)]):min([int(rows_to), len(rowdata)])]
+                result["rows"] = rowdata
             return Response(to_str(json.dumps(result)), mimetype='text/json')
         else:
             return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown queryid.'})), mimetype='text/json')
@@ -431,8 +451,32 @@ def fetch_result(uuid):
             result["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
         result['transaction_status'] = get_transaction_status_text(executors[result['alias']].conn.get_transaction_status())
         if result['complete'] == True: #put result in queue for db-storage
-            dbSyncQueue.put(result)
-            del queryResults[uuid]
+            if rows_from and rows_to:
+                if not result_cache[uuid]:
+                    result_cache[uuid] = {'time': time.time(), 'save_to_disk':True, 'result': result}
+                    del queryResults[uuid]
+            else:
+                dbSyncQueue.put(result)
+                del queryResults[uuid]
+        if rows_from and rows_to:
+            partialrows = result["rows"][min([int(rows_from), len(result["rows"])]) : min([int(rows_to), len(result["rows"])])]
+            partialresult = {
+                'alias': result["alias"],
+                'batchid': result['batchid'],
+                'queryid': result['queryid'],
+                'columns': result["columns"],
+                'rows': partialrows,
+                'query': result["query"],
+                'notices': result["notices"],
+                'statusmessage': result["statusmessage"],
+                'complete': result['complete'],
+                'executing': result['executing'],
+                'timestamp': result["timestamp"],
+                'runtime_seconds': result["runtime_seconds"],
+                'transaction_status': result['transaction_status'],
+                'error': result["error"]
+            }
+            return Response(to_str(json.dumps(partialresult, default=str)), mimetype='text/json')
         return Response(to_str(json.dumps(result, default=str)), mimetype='text/json')
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected.', 'actual_error' : str(e)})), mimetype='text/json')
@@ -534,6 +578,10 @@ def app_query():
 @app.route("/result/<uuid>")
 def app_result(uuid):
     return fetch_result(uuid)
+
+@app.route("/result/<uuid>/<rows_from>/<rows_to>")
+def app_partial_result(uuid, rows_from, rows_to):
+    return fetch_result(uuid, rows_from, rows_to)
 
 @app.route("/executing")
 def app_executing():
