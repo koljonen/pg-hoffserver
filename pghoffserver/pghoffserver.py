@@ -30,7 +30,7 @@ completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
 completerSettings = defaultdict(list)
 executors = defaultdict(list)  # Dict mapping buffer ids to pgexecutor objects
-executor_lock = Lock()
+executor_lock = defaultdict(lambda: Lock())
 bufferConnections = defaultdict(str) #Dict mapping bufferids to connectionstrings
 queryResults = defaultdict(list)
 dbSyncQueue = Queue()
@@ -145,7 +145,7 @@ def connect_server(alias, authkey=None):
         return {'alias': alias, 'success':False, 'errormessage':'Already connected to server.'}
     refresher = CompletionRefresher()
     try:
-        with executor_lock:
+        with executor_lock[alias]:
             dsn = server.get('dsn')
             executor = new_executor(server['url'], dsn, authkey)
             with executor.conn.cursor() as cur:
@@ -187,9 +187,9 @@ def update_completer_settings(alias, new_settings):
                                         lambda c: swap_completer(c, alias, True)), settings=completerSettings[alias])
 
 def refresh_servers():
-    with executor_lock:
-        for alias, server in serverList.items():
-            if alias in executors:
+    for alias, server in serverList.items():
+        if alias in executors:
+            with executor_lock[alias]:
                 try:
                     if executors.get(alias).conn.closed == 0:
                         server['connected'] = True
@@ -199,11 +199,11 @@ def refresh_servers():
                 except Exception:
                     server['connected'] = False
                     del executors[alias]
-            else:
-                server['connected'] = False
+        else:
+            server['connected'] = False
 
 def server_status(alias):
-    with executor_lock:
+    with executor_lock[alias]:
         server = next((s for (a, s) in serverList.items() if a == alias), None)
         if not server:
             return {'alias':alias, 'guid':None, 'success':False, 'errormessage':'Unknown alias.'}
@@ -235,16 +235,17 @@ def cancel_execution(alias):
     if not server:
         return {'success':False, 'errormessage':'Unknown alias.'}
     else:
-        for uuid in queryResults:
-            r = queryResults[uuid]
-            if r['alias'] == alias:
-                r['error'] = 'canceling statement due to user request'
-                r['executing'] = False
-                r['complete'] = True
-        while not executor_queues[alias].empty():
-            executor_queues[alias].get(block=False)
-        executors[alias].conn.cancel()
-        executors[alias].conn.rollback()
+        with executor_lock[alias]:
+            for uuid in queryResults:
+                r = queryResults[uuid]
+                if r['alias'] == alias and r['complete'] == False:
+                    r['error'] = 'canceling statement due to user request'
+                    r['executing'] = False
+                    r['complete'] = True
+            while not executor_queues[alias].empty():
+                executor_queues[alias].get(block=True)
+            executors[alias].conn.cancel()
+            executors[alias].conn.rollback()
 
     return {'success':True, 'errormessage':None}
 
@@ -337,7 +338,7 @@ def executor_queue_worker(alias):
                     cur.execute(query)
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
-                if cur.description:
+                if cur.description and not currentQuery['error']:
                     x = 0
                     columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
                     currentQuery['columns'] = columns
@@ -617,8 +618,11 @@ def app_disconnect():
 def app_cancel():
     try:
         alias = request.form['alias']
+        if executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
+            return Response(to_str(json.dumps({'success':False, 'errormessage':'Not executing'})), mimetype='text/json')
         cancel_execution(alias)
         return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage':to_str(e)})), mimetype='text/json')
 
@@ -659,6 +663,19 @@ def app_refresh_completer():
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
     return refresh_completer(alias)
+
+@app.route("/query_status/<uuid>")
+def query_status(uuid):
+    try:
+        querystatus = {
+            'complete': queryResults[uuid]['complete'],
+            'query': queryResults[uuid]['query'],
+            'queryid': queryResults[uuid]['queryid']
+            }
+        return Response(to_str(json.dumps(querystatus)), mimetype='text/json')
+    except:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown queryid'})), mimetype='text/json')
+
 
 @app.route("/search", methods=['POST'])
 def app_search():
