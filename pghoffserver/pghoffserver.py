@@ -342,7 +342,8 @@ def executor_queue_worker(alias):
         try:
             with executor.conn.cursor() as cur:
                 completer = completers[alias]
-                refresh_metadata(alias, cur)
+                if executors[alias].conn.get_transaction_status() != TRANSACTION_STATUS_INERROR:
+                    refresh_metadata(alias, cur)
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
                 currentQuery = queryResults[uid]
                 currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
