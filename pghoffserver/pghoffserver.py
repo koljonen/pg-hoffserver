@@ -253,6 +253,8 @@ def cancel_execution(alias):
         with executor_lock[alias]:
             for uuid in queryResults:
                 r = queryResults[uuid]
+                if not r:
+                    return {'success':False, 'errormessage':None}
                 if r['alias'] == alias and r['complete'] == False:
                     r['error'] = 'canceling statement due to user request'
                     r['executing'] = False
@@ -436,11 +438,13 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 'timestamp': row["datestamp"],
                 'runtime_seconds': row["runtime_seconds"],
                 'transaction_status': transactiontext,
+                'rowcount': len(rowdata) if rowdata else None,
                 'error': row["error"]
             }
             if rows_from and rows_to:
                 result_cache[uuid] = {'time': time.time(), 'save_to_disk': False, 'result': result}
-                rowdata = rowdata[min([int(rows_from), len(rowdata)]):min([int(rows_to), len(rowdata)])]
+                result['rowcount'] = len(rowdata) if rowdata else 0
+                rowdata = rowdata[min([int(rows_from), len(rowdata)]):min([int(rows_to), len(rowdata)])] if rowdata else None
                 result["rows"] = rowdata
             return Response(to_str(json.dumps(result)), mimetype='text/json')
         else:
@@ -459,7 +463,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 dbSyncQueue.put(result)
                 del queryResults[uuid]
         if rows_from and rows_to:
-            partialrows = result["rows"][min([int(rows_from), len(result["rows"])]) : min([int(rows_to), len(result["rows"])])]
+            partialrows = result["rows"][min([int(rows_from), len(result["rows"])]) : min([int(rows_to), len(result["rows"])])] if result["rows"] else None
             partialresult = {
                 'alias': result["alias"],
                 'batchid': result['batchid'],
@@ -474,6 +478,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 'timestamp': result["timestamp"],
                 'runtime_seconds': result["runtime_seconds"],
                 'transaction_status': result['transaction_status'],
+                'rowcount': len(result["rows"]) if result["rows"] else 0,
                 'error': result["error"]
             }
             return Response(to_str(json.dumps(partialresult, default=str)), mimetype='text/json')
@@ -567,7 +572,7 @@ def app_query():
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
-    if not executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
+    if not executors[alias].conn.status == STATUS_READY:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Already executing query'})), mimetype='text/json')
     queryids = queue_query(alias, sql)
     urls = []
@@ -666,10 +671,9 @@ def app_disconnect():
 def app_cancel():
     try:
         alias = request.form['alias']
-        if executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
+        if alias in executors and executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
             return Response(to_str(json.dumps({'success':False, 'errormessage':'Not executing'})), mimetype='text/json')
-        cancel_execution(alias)
-        return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+        return Response(to_str(json.dumps(cancel_execution(alias))), mimetype='text/json')
 
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage':to_str(e)})), mimetype='text/json')
@@ -714,16 +718,19 @@ def app_refresh_completer():
 
 @app.route("/query_status/<uuid>")
 def query_status(uuid):
-    try:
-        querystatus = {
-            'complete': queryResults[uuid]['complete'],
-            'query': queryResults[uuid]['query'],
-            'queryid': queryResults[uuid]['queryid']
-            }
-        return Response(to_str(json.dumps(querystatus)), mimetype='text/json')
-    except:
-        return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown queryid'})), mimetype='text/json')
-
+    querystatus = {
+        'complete': queryResults[uuid]['complete'],
+        'query': queryResults[uuid]['query'],
+        'queryid': queryResults[uuid]['queryid'],
+        'has_result': True if queryResults[uuid]['columns'] and len(queryResults[uuid]['columns']) > 0 else False,
+        'has_notices': True if queryResults[uuid]['notices'] else False,
+        'has_error': True if queryResults[uuid]['error'] else False,
+        'has_queryplan': True if queryResults[uuid]['columns'] and
+                                 len(queryResults[uuid]['columns']) == 1 and
+                                 queryResults[uuid]['columns'][0]['name'] == 'QUERY PLAN' and
+                                 queryResults[uuid]['statusmessage'] == 'EXPLAIN' else False
+        }
+    return Response(to_str(json.dumps(querystatus)), mimetype='text/json')
 
 @app.route("/search", methods=['POST'])
 def app_search():
