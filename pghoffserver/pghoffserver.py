@@ -325,7 +325,7 @@ def queue_query(alias, sql):
         }
         executor_queues[alias].put({'uuid': queryid})
         queryids.append(queryid)
-    return queryids
+    return {'queryids': queryids, 'batchid': batchid}
 
 def executor_queue_worker(alias):
     executor = executors[alias]
@@ -575,11 +575,13 @@ def app_query():
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
     if not executors[alias].conn.status == STATUS_READY:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Already executing query'})), mimetype='text/json')
-    queryids = queue_query(alias, sql)
+    queryqueue = queue_query(alias, sql)
+    queryids = queryqueue['queryids']
+    batchid = queryqueue['batchid']
     urls = []
     for qid in queryids:
         urls.append('localhost:5000/result/' + qid)
-    return Response(to_str(json.dumps({'success':True, 'queryids':queryids, 'Urls':urls, 'errormessage':None})), mimetype='text/json')
+    return Response(to_str(json.dumps({'success':True, 'batchid':batchid, 'queryids':queryids, 'Urls':urls, 'errormessage':None})), mimetype='text/json')
 
 @app.route("/result/<uuid>")
 def app_result(uuid):
@@ -722,6 +724,7 @@ def query_status(uuid):
     querystatus = {
         'complete': queryResults[uuid]['complete'],
         'query': queryResults[uuid]['query'],
+        'batchid': queryResults[uuid]['batchid'],
         'queryid': queryResults[uuid]['queryid'],
         'has_result': True if queryResults[uuid]['columns'] and len(queryResults[uuid]['columns']) > 0 else False,
         'has_notices': True if queryResults[uuid]['notices'] else False,
