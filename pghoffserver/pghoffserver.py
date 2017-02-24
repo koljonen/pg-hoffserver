@@ -5,6 +5,7 @@ from flask import Flask, request, Response, render_template
 from threading import Lock, Thread
 from multiprocessing import Queue
 from collections import defaultdict
+from collections import OrderedDict
 from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
 from pgcli.completion_refresher import CompletionRefresher
@@ -19,13 +20,17 @@ from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
                                 TRANSACTION_STATUS_ACTIVE,
                                 TRANSACTION_STATUS_INTRANS,
                                 TRANSACTION_STATUS_INERROR,
-                                TRANSACTION_STATUS_UNKNOWN)
+                                TRANSACTION_STATUS_UNKNOWN,
+                                STATUS_READY,
+                                STATUS_IN_TRANSACTION,
+                                STATUS_PREPARED)
+
 home_dir = os.path.expanduser('~/.pghoffserver')
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
 completerSettings = defaultdict(list)
 executors = defaultdict(list)  # Dict mapping buffer ids to pgexecutor objects
-executor_lock = Lock()
+executor_lock = defaultdict(lambda: Lock())
 bufferConnections = defaultdict(str) #Dict mapping bufferids to connectionstrings
 queryResults = defaultdict(list)
 dbSyncQueue = Queue()
@@ -33,6 +38,7 @@ type_dict = defaultdict(dict)
 config = {}
 serverList = {}
 uuids_pending_execution = []
+result_cache = defaultdict(list)
 executor_queues = defaultdict(lambda: Queue())
 db_name = 'hoff.db'
 
@@ -62,7 +68,7 @@ def main():
             sys.exit(0)
     try:
         with open(home_dir + '/config.json') as json_data_file:
-            config = json.load(json_data_file)
+            config = json.load(json_data_file, object_pairs_hook=OrderedDict)
             #Todo: load PGCLI using site-dirs from config file.
             serverList = config['connections']
             completerSettings = dict([ (a, c.get('completer_settings')) for (a, c) in config['connections'].items()])
@@ -70,7 +76,11 @@ def main():
         config = dict()
         serverList = dict()
     init_db()
-    app.run()
+    #start cleanup worker
+    t = Thread(target=cleanup_worker,
+                   name='cleanup_worker')
+    t.setDaemon(True)
+    t.start()
 
 def init_db():
     sql = """CREATE TABLE IF NOT EXISTS QueryData(
@@ -81,6 +91,14 @@ def init_db():
     )"""
     conn = sqlite3.connect(home_dir + '/' + db_name)
     conn.execute(sql)
+    sql = """CREATE TABLE IF NOT EXISTS CellOperations(
+      name text, colloperationcell text, celloperationtype, query text
+    )"""
+    conn.execute(sql)
+    sql = """CREATE TABLE IF NOT EXISTS CellOperationChecks(
+      celloperationcell text, checkname text, validationcell text,
+      comparisoncell text, comparisonvalue text, operator text
+    )"""
     conn.close()
     t = Thread(target=db_worker,
                    name='db_worker')
@@ -90,13 +108,21 @@ def init_db():
 def db_worker():
     conn = sqlite3.connect(home_dir + '/' + db_name)
     while True:
-        result = dbSyncQueue.get(block=True)
-        for r in result:
-            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
-                r['query'], json.dumps(r['notices']),
-                r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
-            conn.commit()
+        r = dbSyncQueue.get(block=True)
+        conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
+            r['query'], json.dumps(r['notices']),
+            r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
+        conn.commit()
+
+def cleanup_worker():
+    while True:
+        time.sleep(10)
+        toremove = []
+        for (uuid, cache) in [(uuid, cache) for (uuid, cache) in result_cache.items() if time.time() - cache['time'] >= 10]:
+            if cache['save_to_disk']:
+                dbSyncQueue.put(cache['result'], block=False)
+            del result_cache[uuid]
 
 def to_str(string):
     if sys.version_info < (3,0):
@@ -134,7 +160,7 @@ def connect_server(alias, authkey=None):
         return {'alias': alias, 'success':False, 'errormessage':'Already connected to server.'}
     refresher = CompletionRefresher()
     try:
-        with executor_lock:
+        with executor_lock[alias]:
             dsn = server.get('dsn')
             executor = new_executor(server['url'], dsn, authkey)
             with executor.conn.cursor() as cur:
@@ -146,6 +172,17 @@ def connect_server(alias, authkey=None):
             serverList[alias]['connected'] = True
     except psycopg2.Error as e:
         return {'success':False, 'errormessage':to_str(e)}
+
+    #wait for connection to be established
+    sleep = 0
+    while True:
+        time.sleep(0.01)
+        sleep += 0.01
+        if sleep >= 5:
+            return {'alias': alias, 'success':False, 'errormessage':'Connection timed out.'}
+        elif executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE and executors[alias].conn.status == STATUS_READY:
+            time.sleep(0.5)
+            break;
 
     #create a queue for this alias and start a worker thread
     executor_queues[alias] = Queue()
@@ -165,9 +202,9 @@ def update_completer_settings(alias, new_settings):
                                         lambda c: swap_completer(c, alias, True)), settings=completerSettings[alias])
 
 def refresh_servers():
-    with executor_lock:
-        for alias, server in serverList.items():
-            if alias in executors:
+    for alias, server in serverList.items():
+        if alias in executors:
+            with executor_lock[alias]:
                 try:
                     if executors.get(alias).conn.closed == 0:
                         server['connected'] = True
@@ -177,11 +214,11 @@ def refresh_servers():
                 except Exception:
                     server['connected'] = False
                     del executors[alias]
-            else:
-                server['connected'] = False
+        else:
+            server['connected'] = False
 
 def server_status(alias):
-    with executor_lock:
+    with executor_lock[alias]:
         server = next((s for (a, s) in serverList.items() if a == alias), None)
         if not server:
             return {'alias':alias, 'guid':None, 'success':False, 'errormessage':'Unknown alias.'}
@@ -213,8 +250,20 @@ def cancel_execution(alias):
     if not server:
         return {'success':False, 'errormessage':'Unknown alias.'}
     else:
-        executors[alias].conn.cancel()
-        executors[alias].conn.rollback()
+        with executor_lock[alias]:
+            for uuid in queryResults:
+                r = queryResults[uuid]
+                if not r:
+                    return {'success':False, 'errormessage':None}
+                if r['alias'] == alias and r['complete'] == False:
+                    r['error'] = 'canceling statement due to user request'
+                    r['executing'] = False
+                    r['complete'] = True
+            while not executor_queues[alias].empty():
+                executor_queues[alias].get(block=True)
+            executors[alias].conn.cancel()
+            executors[alias].conn.rollback()
+
     return {'success':True, 'errormessage':None}
 
 def new_executor(url, dsn=None, pwd=None, settings=None):
@@ -239,8 +288,44 @@ def get_transaction_status_text(status):
         TRANSACTION_STATUS_UNKNOWN: 'unknown'
     }[status]
 
-def queue_query(uuid, alias, sql):
-    executor_queues[alias].put({'sql': sql, 'uuid': uuid})
+def refresh_metadata(alias, cur):
+    cur.execute('SELECT oid, oid::regtype::text FROM pg_type')
+    type_dict[alias] = dict(row for row in cur.fetchall())
+
+def refresh_completer(alias):
+    try:
+        refresher = CompletionRefresher()
+        refresher.refresh(executors[alias], special=special, callbacks=(
+                                lambda c: swap_completer(c, alias)), settings=completerSettings[alias])
+        return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+    except:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Could not refresh metadata.'})), mimetype='text/json')
+
+def queue_query(alias, sql):
+    queryids = []
+    batchid = to_str(uuid.uuid1())
+    for sql in sqlparse.split(sql):
+        queryid = to_str(uuid.uuid1())
+        queryResults[queryid] = {
+            'alias': alias,
+            'batchid': batchid,
+            'queryid': queryid,
+            'columns': None,
+            'rows': None,
+            'query': sql,
+            'notices': None,
+            'statusmessage': None,
+            'complete': False,
+            'executing': False,
+            'timestamp': None,
+            'runtime_seconds': None,
+            'error':None,
+            'transaction_status':None,
+            'dynamic_alias': None
+        }
+        executor_queues[alias].put({'uuid': queryid})
+        queryids.append(queryid)
+    return queryids
 
 def executor_queue_worker(alias):
     executor = executors[alias]
@@ -252,47 +337,30 @@ def executor_queue_worker(alias):
         time.sleep(2)
     #pick up work from queue
     while alias in serverList and serverList[alias].get('connected'):
-        query = executor_queues[alias].get(block=True)
-        sql = query['sql']
-        uid = query['uuid']
-
-        for sql in sqlparse.split(sql):
-            queryResults[uid].append({
-                'alias': alias,
-                'batchid': uid,
-                'queryid': to_str(uuid.uuid1()),
-                'columns': None,
-                'rows': None,
-                'query': sql,
-                'notices': None,
-                'statusmessage': None,
-                'complete': False,
-                'executing': False,
-                'timestamp': None,
-                'runtime_seconds': None,
-                'error':None,
-                'transaction_status':None,
-                'dynamic_alias': None
-            })
-        with executor.conn.cursor() as cur:
-            completer = completers[alias]
-            for n, qr in enumerate(queryResults[uid]):
+        queue = executor_queues[alias].get(block=True)
+        uid = queue['uuid']
+        try:
+            with executor.conn.cursor() as cur:
+                completer = completers[alias]
+                if executors[alias].conn.get_transaction_status() != TRANSACTION_STATUS_INERROR:
+                    refresh_metadata(alias, cur)
                 timestamp_ts = time.mktime(datetime.datetime.now().timetuple())
-                currentQuery = queryResults[uid][n]
+                currentQuery = queryResults[uid]
                 currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
                 currentQuery['executing'] = True
-                queryResults[uid][n] = currentQuery
+                queryResults[uid] = currentQuery
                 #Check if there are any dynamic tables in the query
-                query = update_query_with_dynamic_tables(qr['query'])
+                query = update_query_with_dynamic_tables(queryResults[uid]['query'])
                 #run query
                 try:
                     cur.execute(query)
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
-                if cur.description:
-                    currentQuery['columns'] = [{'name': completer.case(d.name), 'type_code': d.type_code,
-                                                'type': type_dict[alias][d.type_code]} for d in cur.description]
-                    currentQuery['rows'] = list(cur.fetchall())
+                if cur.description and not currentQuery['error']:
+                    x = 0
+                    columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
+                    currentQuery['columns'] = columns
+                    currentQuery['rows'] = [{str(header):column for header, column in zip([completer.case(d["field"]) for d in columns], x)} for x in list(cur.fetchall())]
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
                 currentQuery['complete'] = True
@@ -302,8 +370,11 @@ def executor_queue_worker(alias):
                 while executor.conn.notices:
                     notices.append(executor.conn.notices.pop(0))
                 currentQuery['notices'] = notices
-                queryResults[uid][n] = currentQuery
-            uuids_pending_execution.remove(uid)
+                queryResults[uid] = currentQuery
+        except Exception as e:
+            currentQuery = queryResults[uid]
+            currentQuery['error'] = to_str(e)
+            currentQuery['complete'] = True
 
 def update_query_with_dynamic_tables(query):
     dynamic_tables = list_dynamic_tables()
@@ -340,51 +411,78 @@ def dict_factory(cursor, row):
         d[col[0]] = row[idx]
     return d
 
-def fetch_result(uuid):
-    result = queryResults[uuid]
-    if not result: #look in uuids_pending_execution list and wait up to 5 seconds
-        if uuid in uuids_pending_execution:
-            for x in range(1,500):
-                time.sleep(0.01)
-                result = queryResults[uuid]
-                if result:
-                    break
+def fetch_result(uuid, rows_from=None, rows_to=None):
+    result = queryResults[uuid] or result_cache and result_cache[uuid]['result']
     if not result: #look for result in db
         conn = sqlite3.connect(home_dir + '/' + db_name)
         conn.row_factory = dict_factory
         cur = conn.cursor()
-        cur.execute("SELECT * FROM QueryData WHERE batchid = ?", (to_str(uuid),))
-        row = cur.fetchone() ##todo fetch whole batch of queries
+        cur.execute("SELECT * FROM QueryData WHERE queryid = ?", (to_str(uuid),))
+        row = cur.fetchone()
         if row:
+            try:
+                transactiontext = get_transaction_status_text(executors[row['alias']].conn.get_transaction_status())
+            except:
+                transactiontext = None
+            rowdata = json.loads(row["rows"])
             result = {
                 'alias': row["alias"],
                 'batchid': row['batchid'],
                 'queryid': row['queryid'],
                 'columns': json.loads(row["columns"]),
-                'rows': json.loads(row["rows"]),
+                'rows': rowdata,
                 'query': row["query"],
                 'notices': json.loads(row["notices"]),
                 'statusmessage': row["statusmessage"],
-                'complete': 'lolz',
+                'complete': True,
                 'executing': False,
                 'timestamp': row["datestamp"],
                 'runtime_seconds': row["runtime_seconds"],
+                'transaction_status': transactiontext,
+                'rowcount': len(rowdata) if rowdata else None,
                 'error': row["error"]
             }
+            if rows_from and rows_to:
+                result_cache[uuid] = {'time': time.time(), 'save_to_disk': False, 'result': result}
+                result['rowcount'] = len(rowdata) if rowdata else 0
+                rowdata = rowdata[min([int(rows_from), len(rowdata)]):min([int(rows_to), len(rowdata)])] if rowdata else None
+                result["rows"] = rowdata
             return Response(to_str(json.dumps(result)), mimetype='text/json')
         else:
-            return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown uuid.'})), mimetype='text/json')
+            return Response(to_str(json.dumps({'success':False, 'errormessage':'Unknown queryid.'})), mimetype='text/json')
     try:
-        sync_to_db = True
-        for r in result:
-            if r['executing'] == True:
-                sync_to_db = False
-                timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
-                r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-            r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
-        if sync_to_db: #put result in queue for db-storage
-            dbSyncQueue.put(result)
-            del queryResults[uuid]
+        if result['executing'] == True:
+            timestamp_ts = time.mktime(datetime.datetime.strptime(result["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
+            result["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+        result['transaction_status'] = get_transaction_status_text(executors[result['alias']].conn.get_transaction_status())
+        if result['complete'] == True: #put result in queue for db-storage
+            if rows_from and rows_to:
+                if not result_cache[uuid]:
+                    result_cache[uuid] = {'time': time.time(), 'save_to_disk':True, 'result': result}
+                    del queryResults[uuid]
+            else:
+                dbSyncQueue.put(result)
+                del queryResults[uuid]
+        if rows_from and rows_to:
+            partialrows = result["rows"][min([int(rows_from), len(result["rows"])]) : min([int(rows_to), len(result["rows"])])] if result["rows"] else None
+            partialresult = {
+                'alias': result["alias"],
+                'batchid': result['batchid'],
+                'queryid': result['queryid'],
+                'columns': result["columns"],
+                'rows': partialrows,
+                'query': result["query"],
+                'notices': result["notices"],
+                'statusmessage': result["statusmessage"],
+                'complete': result['complete'],
+                'executing': result['executing'],
+                'timestamp': result["timestamp"],
+                'runtime_seconds': result["runtime_seconds"],
+                'transaction_status': result['transaction_status'],
+                'rowcount': len(result["rows"]) if result["rows"] else 0,
+                'error': result["error"]
+            }
+            return Response(to_str(json.dumps(partialresult, default=str)), mimetype='text/json')
         return Response(to_str(json.dumps(result, default=str)), mimetype='text/json')
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected.', 'actual_error' : str(e)})), mimetype='text/json')
@@ -436,7 +534,16 @@ def construct_dynamic_table(dynamic_table_name):
     output = []
     sql = ''
     for row in rows:
-        output.append(",".join( (to_str(column) if column else to_str('NULL')) if header['type'] in ('integer', 'bigint', 'numeric', 'smallint') else ("'" + to_str(column) + "'" if column else to_str('NULL')) for column, header in zip(row, columnheaders)))
+        values = []
+        for header in columnheaders:
+            if row[header['field']]:
+                if header['type'] in ('integer', 'bigint', 'numeric', 'smallint'):
+                    values.append(to_str(row[header['field']]))
+                else:
+                    values.append("'" + to_str(row[header['field']]) + "'")
+            else:
+                values.append('NULL')
+        output.append(','.join(values))
     sql += "),(".join(str(column) for column in output)
     sql = '(SELECT * FROM (VALUES(' + sql + ')) DT (' + ",".join(str(column['name']) for column in columnheaders) + '))'
     return sql
@@ -446,7 +553,7 @@ def search_query_history(q, search_data=False):
     conn.row_factory = dict_factory
     cur = conn.cursor()
     cur.execute("""SELECT alias,
-        CASE WHEN LENGTH(query) > 50 THEN substr(query, 0, 50) || '...' ELSE query END as query,
+        query,
         runtime_seconds, datestamp as timestamp, batchid, queryid FROM QueryData WHERE query LIKE :q """
         + (" OR rows LIKE :q" if search_data else "")
         + " ORDER BY datestamp DESC;", ({"q":'%' + q + '%'}))
@@ -463,32 +570,37 @@ app = Flask(__name__)
 def app_query():
     alias = request.form.get('alias', 'Vagrant')
     sql = request.form['query']
-    uid = to_str(uuid.uuid1())
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
-    uuids_pending_execution.append(uid)
-    queue_query(uid, alias, sql)
-    return Response(to_str(json.dumps({'success':True, 'guid':uid, 'Url':'localhost:5000/result/' + uid, 'errormessage':None})), mimetype='text/json')
+    if not executors[alias].conn.status == STATUS_READY:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Already executing query'})), mimetype='text/json')
+    queryids = queue_query(alias, sql)
+    urls = []
+    for qid in queryids:
+        urls.append('localhost:5000/result/' + qid)
+    return Response(to_str(json.dumps({'success':True, 'queryids':queryids, 'Urls':urls, 'errormessage':None})), mimetype='text/json')
 
 @app.route("/result/<uuid>")
 def app_result(uuid):
     return fetch_result(uuid)
 
+@app.route("/result/<uuid>/<rows_from>/<rows_to>")
+def app_partial_result(uuid, rows_from, rows_to):
+    return fetch_result(uuid, rows_from, rows_to)
+
 @app.route("/executing")
 def app_executing():
     output = []
     uuid_delete = []
-    for n, uuid in enumerate(queryResults):
-        sync_to_db = True
-        for n, r in enumerate(queryResults[uuid]):
-            if r['executing']:
-                sync_to_db = False
-                timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
-                r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
-            r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
-            output.append(r)
-        if sync_to_db:
+    for uuid in queryResults:
+        r = queryResults[uuid]
+        if r['executing']:
+            timestamp_ts = time.mktime(datetime.datetime.strptime(r["timestamp"], '%Y-%m-%d %H:%M:%S').timetuple())
+            r["runtime_seconds"] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+        r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
+        output.append(r)
+        if r['complete']:
             dbSyncQueue.put(queryResults[uuid])
             uuid_delete.append(uuid)
     for uuid in uuid_delete:
@@ -560,8 +672,10 @@ def app_disconnect():
 def app_cancel():
     try:
         alias = request.form['alias']
-        cancel_execution(alias)
-        return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+        if alias in executors and executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE:
+            return Response(to_str(json.dumps({'success':False, 'errormessage':'Not executing'})), mimetype='text/json')
+        return Response(to_str(json.dumps(cancel_execution(alias))), mimetype='text/json')
+
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage':to_str(e)})), mimetype='text/json')
 
@@ -594,6 +708,30 @@ def app_list_dynamic_tables():
 def app_export_dynamic_table():
     name = request.form['name']
     return Response(to_str(construct_dynamic_table(name)), mimetype='text')
+
+@app.route("/refresh_definitions", methods=['POST'])
+def app_refresh_completer():
+    alias = request.form.get('alias')
+    sstatus = server_status(alias)
+    if not sstatus['success']:
+        return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
+    return refresh_completer(alias)
+
+@app.route("/query_status/<uuid>")
+def query_status(uuid):
+    querystatus = {
+        'complete': queryResults[uuid]['complete'],
+        'query': queryResults[uuid]['query'],
+        'queryid': queryResults[uuid]['queryid'],
+        'has_result': True if queryResults[uuid]['columns'] and len(queryResults[uuid]['columns']) > 0 else False,
+        'has_notices': True if queryResults[uuid]['notices'] else False,
+        'has_error': True if queryResults[uuid]['error'] else False,
+        'has_queryplan': True if queryResults[uuid]['columns'] and
+                                 len(queryResults[uuid]['columns']) == 1 and
+                                 queryResults[uuid]['columns'][0]['name'] == 'QUERY PLAN' and
+                                 queryResults[uuid]['statusmessage'] == 'EXPLAIN' else False
+        }
+    return Response(to_str(json.dumps(querystatus)), mimetype='text/json')
 
 @app.route("/search", methods=['POST'])
 def app_search():
@@ -639,5 +777,5 @@ def app_update_completer_settings():
 def site_main():
     return render_template('history.html')
 
-if __name__ == "__main__":
-    main()
+#init server
+main()

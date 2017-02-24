@@ -2,14 +2,15 @@ from setuptools import setup
 
 install_requirements = [
   'Flask==0.11.1',
-  'pgcli==1.2.0',
-  'psycopg2==2.6.2',
-  'simplejson>=2.1'
+  'pgcli>=1.2.0',
+  'psycopg2>=2.6.2',
+  'simplejson>=2.1',
+  'gunicorn>=19.6.0'
 ]
 
 setup(name='pg-hoffserver',
-    version='0.1.4',
-    description='json interface to pgcli',
+    version='0.2.1',
+    description='pghoff, google it.',
     url='http://github.com/commitmachine/pg-hoffserver',
     author='commitmachine',
     author_email='commitmachine@asdasd.se',
