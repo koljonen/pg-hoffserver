@@ -192,7 +192,7 @@ def connect_server(alias, authkey=None):
     t.setDaemon(True)
     t.start()
 
-    return {'alias': alias, 'success':True, 'errormessage':None}
+    return {'alias': alias, 'success':True, 'color': config['connections'][alias].get('color'), 'errormessage':None}
 
 def update_completer_settings(alias, new_settings):
     if new_settings != completerSettings[alias]:
