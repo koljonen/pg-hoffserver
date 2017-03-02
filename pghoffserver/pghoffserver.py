@@ -301,10 +301,19 @@ def refresh_completer(alias):
     except:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Could not refresh metadata.'})), mimetype='text/json')
 
-def queue_query(alias, sql):
+def queue_query(alias, sql, cursor_pos):
     queryids = []
     batchid = to_str(uuid.uuid1())
+    statementlength = 0
+    query_found = False
     for sql in sqlparse.split(sql):
+        statementlength += len(sql)
+        if cursor_pos:
+            if cursor_pos >= statementlength:
+                continue
+            elif cursor_pos < statementlength and query_found:
+                continue
+            query_found = True
         queryid = to_str(uuid.uuid1())
         queryResults[queryid] = {
             'alias': alias,
@@ -570,12 +579,19 @@ app = Flask(__name__)
 def app_query():
     alias = request.form.get('alias', 'Vagrant')
     sql = request.form['query']
+    cursor_pos = request.form.get('cursor_pos', None)
+    if cursor_pos:
+        try:
+            cursor_pos = int(cursor_pos)
+        except:
+            return Response(to_str(json.dumps({'success':False, 'errormessage':'Invalid cursor position'})), mimetype='text/json')
+
     sstatus = server_status(alias)
     if not sstatus['success']:
         return Response(to_str(json.dumps(sstatus)), mimetype='text/json')
     if not executors[alias].conn.status == STATUS_READY:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'Already executing query'})), mimetype='text/json')
-    queryqueue = queue_query(alias, sql)
+    queryqueue = queue_query(alias, sql, cursor_pos)
     queryids = queryqueue['queryids']
     batchid = queryqueue['batchid']
     urls = []
