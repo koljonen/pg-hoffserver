@@ -367,9 +367,23 @@ def executor_queue_worker(alias):
                     currentQuery['error'] = to_str(e)
                 if cur.description and not currentQuery['error']:
                     x = 0
-                    columns = [{'name': completer.case(d.name), 'type_code': d.type_code, 'type': type_dict[alias][d.type_code], 'field':completer.case(d.name) + str(i)} for i, d in enumerate(cur.description, 1)]
+                    columns = [
+                        {
+                            'name': completer.case(d.name),
+                            'type_code': d.type_code,
+                            'type': type_dict[alias][d.type_code],
+                            'field':completer.case(d.name) + str(i),
+                            'data_length': 0
+                        } for i, d in enumerate(cur.description, 1)
+                    ]
                     currentQuery['columns'] = columns
-                    currentQuery['rows'] = [{str(header):column for header, column in zip([completer.case(d["field"]) for d in columns], x)} for x in list(cur.fetchall())]
+                    currentQuery['rows'] = []
+                    for row in cur.fetchall():
+                        rowdict = {}
+                        currentQuery['rows'].append(rowdict)
+                        for col, data in zip(columns, row):
+                            rowdict[completer.case(col["field"])] = data
+                            col['data_length'] = max(len(str(data)), col['data_length'])
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
                 currentQuery['complete'] = True
@@ -439,7 +453,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 'batchid': row['batchid'],
                 'queryid': row['queryid'],
                 'columns': json.loads(row["columns"]),
-                'rows': rowdata,
+                'rows': rowdata or [],
                 'query': row["query"],
                 'notices': json.loads(row["notices"]),
                 'statusmessage': row["statusmessage"],
@@ -479,7 +493,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 'batchid': result['batchid'],
                 'queryid': result['queryid'],
                 'columns': result["columns"],
-                'rows': partialrows,
+                'rows': partialrows or [],
                 'query': result["query"],
                 'notices': result["notices"],
                 'statusmessage': result["statusmessage"],
