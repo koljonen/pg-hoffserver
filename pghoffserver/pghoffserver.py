@@ -1,5 +1,5 @@
 from __future__ import unicode_literals, print_function
-import sys, os, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re
+import sys, os, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re, hoffparser
 import simplejson as json
 from flask import Flask, request, Response, render_template
 from threading import Lock, Thread
@@ -740,6 +740,11 @@ def app_list_dynamic_tables():
 def app_export_dynamic_table():
     name = request.form['name']
     return Response(to_str(construct_dynamic_table(name)), mimetype='text')
+
+@app.route("/get_metadata", methods=['POST'])
+def get_metadata():
+    sql = request.form['sql']
+    return Response(to_str(json.dumps(hoffparser.extract_tables(sql))), mimetype='text')
 
 @app.route("/refresh_definitions", methods=['POST'])
 def app_refresh_completer():
