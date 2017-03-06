@@ -46,6 +46,7 @@ def main():
     global serverList
     global config
     global apikey
+    global completerSettings
     # Stop psycopg2 from mangling intervals
     psycopg2.extensions.register_type(psycopg2.extensions.new_type(
         (1186,), str("intrvl"), lambda val, cur: val))
