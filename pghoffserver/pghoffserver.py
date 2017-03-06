@@ -159,6 +159,7 @@ def connect_server(alias, authkey=None):
     if executors[alias]:
         return {'alias': alias, 'success':False, 'errormessage':'Already connected to server.'}
     refresher = CompletionRefresher()
+    history = [x['query'] for x in search_query_history('')[:-1:1234]]
     try:
         with executor_lock[alias]:
             dsn = server.get('dsn')
@@ -167,8 +168,12 @@ def connect_server(alias, authkey=None):
                 cur.execute('SELECT oid, oid::regtype::text FROM pg_type')
                 type_dict[alias] = dict(row for row in cur.fetchall())
             executors[alias] = executor
-            refresher.refresh(executor, special=special, callbacks=(
-                              lambda c: swap_completer(c, alias)), settings=completerSettings[alias])
+            refresher.refresh(
+                executor, special=special, history=history, callbacks=(
+                    lambda c: swap_completer(c, alias)
+                ),
+                settings=completerSettings[alias]
+            )
             serverList[alias]['connected'] = True
     except psycopg2.Error as e:
         return {'success':False, 'errormessage':to_str(e)}
