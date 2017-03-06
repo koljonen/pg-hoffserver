@@ -388,7 +388,7 @@ def executor_queue_worker(alias):
                         currentQuery['rows'].append(rowdict)
                         for col, data in zip(columns, row):
                             rowdict[completer.case(col["field"])] = data
-                            col['data_length'] = max(len(str(data)), col['data_length'])
+                            col['data_length'] = max(len(to_str(data)), col['data_length'])
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
                 currentQuery['complete'] = True
