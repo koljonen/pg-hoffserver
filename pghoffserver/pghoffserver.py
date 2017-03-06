@@ -187,7 +187,7 @@ def connect_server(alias, authkey=None):
             return {'alias': alias, 'success':False, 'errormessage':'Connection timed out.'}
         elif executors[alias].conn.get_transaction_status() == TRANSACTION_STATUS_IDLE and executors[alias].conn.status == STATUS_READY:
             time.sleep(0.5)
-            break;
+            break
 
     #create a queue for this alias and start a worker thread
     executor_queues[alias] = Queue()
