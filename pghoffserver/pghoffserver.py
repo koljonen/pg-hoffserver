@@ -25,6 +25,8 @@ from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
                                 STATUS_IN_TRANSACTION,
                                 STATUS_PREPARED)
 
+reload(sys)
+sys.setdefaultencoding('utf8')
 home_dir = os.path.expanduser('~/.pghoffserver')
 completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
@@ -388,7 +390,8 @@ def executor_queue_worker(alias):
                         rowdict = {}
                         currentQuery['rows'].append(rowdict)
                         for col, data in zip(columns, row):
-                            rowdict[completer.case(col["field"])] = data
+                            print(data)
+                            rowdict[completer.case(col["field"])] = to_str(data)
                             col['data_length'] = max(len(to_str(data)), col['data_length'])
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
