@@ -374,7 +374,6 @@ def executor_queue_worker(alias):
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
                 if cur.description and not currentQuery['error']:
-                    x = 0
                     columns = [
                         {
                             'name': completer.case(d.name),
@@ -390,7 +389,6 @@ def executor_queue_worker(alias):
                         rowdict = {}
                         currentQuery['rows'].append(rowdict)
                         for col, data in zip(columns, row):
-                            print(data)
                             rowdict[completer.case(col["field"])] = to_str(data)
                             col['data_length'] = max(len(to_str(data)), col['data_length'])
                 #update query result
