@@ -155,7 +155,7 @@ def connect_server(alias, authkey=None):
         'generate_casing_file' : True,
         'single_connection': True
     }
-    completerSettings[alias] = completerSettings.get(alias, defaultSettings)
+    completerSettings[alias] = completerSettings.get(alias, defaultSettings) or defaultSettings
     server = serverList.get(alias, None)
     if not server:
         return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
