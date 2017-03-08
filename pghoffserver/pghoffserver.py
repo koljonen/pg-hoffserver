@@ -111,12 +111,23 @@ def init_db():
 def db_worker():
     conn = sqlite3.connect(home_dir + '/' + db_name)
     while True:
-        r = dbSyncQueue.get(block=True)
-        conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
-            r['query'], json.dumps(r['notices']),
-            r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
-        conn.commit()
+        dbitem = dbSyncQueue.get(block=True)
+        if dbitem['operation'] == 'write':
+            r = dbitem['data']
+            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
+                r['query'], json.dumps(r['notices']),
+                r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
+            conn.commit()
+        if dbitem['operation'] == 'delete_query':
+            conn.cursor().execute("DELETE QueryData WHERE alias = :a AND datestamp < date('now','-:d days')",
+                                 ({'a':dbitem['alias'], 'd':dbitem['days']}));
+            conn.commit()
+        if dbitem['operation'] == 'delete_querydata':
+            conn.cursor().execute("UPDATE QueryData SET rows = NULL WHERE alias = :a AND datestamp < date('now','-:d days')",
+                                 ({'a':dbitem['alias'], 'd':dbitem['days']}));
+            conn.commit()
+
 
 def cleanup_worker():
     while True:
@@ -124,8 +135,15 @@ def cleanup_worker():
         toremove = []
         for (uuid, cache) in [(uuid, cache) for (uuid, cache) in result_cache.items() if time.time() - cache['time'] >= 10]:
             if cache['save_to_disk']:
-                dbSyncQueue.put(cache['result'], block=False)
+                dbSyncQueue.put({'operation':'write', 'data':cache['result']}, block=False)
             del result_cache[uuid]
+        for alias in serverList:
+            days = serverList[alias].get('data_retention', 7)
+            if days:
+                dbSyncQueue.put({'operation':'delete_querydata', 'alias': alias, 'days': days}, block=False)
+            days = serverList[alias].get('query_retention')
+            if days:
+                dbSyncQueue.put({'operation':'delete_query', 'alias': alias, 'days': days}, block=False)
 
 def to_str(string):
     if sys.version_info < (3,0):
@@ -162,7 +180,7 @@ def connect_server(alias, authkey=None):
     if executors[alias]:
         return {'alias': alias, 'success':False, 'errormessage':'Already connected to server.'}
     refresher = CompletionRefresher()
-    history = [x['query'] for x in search_query_history('')[:-1:1234]]
+    history = [x['query'] for x in search_query_history('', False, 'query', 300, 'DESC')[:-1:299]]
     try:
         with executor_lock[alias]:
             dsn = server.get('dsn')
@@ -491,7 +509,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                     result_cache[uuid] = {'time': time.time(), 'save_to_disk':True, 'result': result}
                     del queryResults[uuid]
             else:
-                dbSyncQueue.put(result)
+                dbSyncQueue.put({'operation':'write', 'data':result})
                 del queryResults[uuid]
         if rows_from and rows_to:
             partialrows = result["rows"][min([int(rows_from), len(result["rows"])]) : min([int(rows_to), len(result["rows"])])] if result["rows"] else None
@@ -578,15 +596,15 @@ def construct_dynamic_table(dynamic_table_name):
     sql = '(SELECT * FROM (VALUES(' + sql + ')) DT (' + ",".join(str(column['name']) for column in columnheaders) + '))'
     return sql
 
-def search_query_history(q, search_data=False):
+def search_query_history(q, search_data=False, columns=None, limit=None, reverse_order=True):
     conn = sqlite3.connect(home_dir + '/' + db_name)
     conn.row_factory = dict_factory
     cur = conn.cursor()
-    cur.execute("""SELECT alias,
-        query,
-        runtime_seconds, datestamp as timestamp, batchid, queryid FROM QueryData WHERE query LIKE :q """
+    cur.execute("SELECT alias, query, runtime_seconds, datestamp as timestamp, batchid, queryid"
+        + " FROM QueryData WHERE query LIKE :q "
         + (" OR rows LIKE :q" if search_data else "")
-        + " ORDER BY datestamp DESC;", ({"q":'%' + q + '%'}))
+        + " ORDER BY datestamp " + ('DESC' if reverse_order else "ASC") + (" LIMIT :l" if limit else ";"),
+        ({"q":'%' + q + '%', "l":limit}))
     result = cur.fetchall()
     return result
 
@@ -640,7 +658,7 @@ def app_executing():
         r['transaction_status'] = get_transaction_status_text(executors[r['alias']].conn.get_transaction_status())
         output.append(r)
         if r['complete']:
-            dbSyncQueue.put(queryResults[uuid])
+            dbSyncQueue.put({'operation':'write', 'data':queryResults[uuid]})
             uuid_delete.append(uuid)
     for uuid in uuid_delete:
         del queryResults[uuid]
