@@ -167,13 +167,18 @@ def remove_server(alias):
     write_config()
 
 def connect_server(alias, authkey=None):
-    defaultSettings = {
+    completer_settings = {
         'generate_aliases' : True,
         'casing_file' : os.path.expanduser('~/.config/pgcli/casing'),
         'generate_casing_file' : True,
-        'single_connection': True
+        'single_connection': True,
+        "call_arg_style": "{arg_name} := ${{{arg_num}:{arg_default}}}",
+        "call_arg_display_style": "{arg_name}:={arg_default}",
+        "call_arg_oneliner_max": 2,
+        "signature_arg_style": "{arg_name} {arg_type}"
     }
-    completerSettings[alias] = completerSettings.get(alias, defaultSettings) or defaultSettings
+    completer_settings.update(completerSettings.get(alias, {}))
+    completerSettings[alias] = completer_settings
     server = serverList.get(alias, None)
     if not server:
         return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
@@ -392,12 +397,13 @@ def executor_queue_worker(alias):
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
                 if cur.description and not currentQuery['error']:
+                    case = completer.case if completer else lambda x: x
                     columns = [
                         {
-                            'name': completer.case(d.name),
+                            'name': case(d.name),
                             'type_code': d.type_code,
                             'type': type_dict[alias][d.type_code],
-                            'field':completer.case(d.name) + str(i),
+                            'field':case(d.name) + str(i),
                             'data_length': 0
                         } for i, d in enumerate(cur.description, 1)
                     ]
@@ -407,7 +413,7 @@ def executor_queue_worker(alias):
                         rowdict = {}
                         currentQuery['rows'].append(rowdict)
                         for col, data in zip(columns, row):
-                            rowdict[completer.case(col["field"])] = data
+                            rowdict[case(col["field"])] = data
                             col['data_length'] = max(len(to_str(data)), col['data_length'])
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
@@ -676,7 +682,7 @@ def app_completions():
             dt_out = [{'text': c, 'type': 'Dynamic table'} for c in dynamic_tables_match]
         comps = completers[alias].get_completions(
                     Document(text=query, cursor_position=int(pos)), None)
-        comps_out = [{'text': c.text, 'type': c._display_meta} for c in comps]
+        comps_out = [{'text': c.text, 'type': c._display_meta, 'displayText': c.display} for c in comps]
         out = dt_out + comps_out
         return Response(to_str(json.dumps(out)), mimetype='text/json')
     return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected to server.'})), mimetype='text/json')
