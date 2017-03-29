@@ -167,7 +167,7 @@ def remove_server(alias):
     write_config()
 
 def connect_server(alias, authkey=None):
-    defaultSettings = {
+    completer_settings = {
         'generate_aliases' : True,
         'casing_file' : os.path.expanduser('~/.config/pgcli/casing'),
         'generate_casing_file' : True,
@@ -177,7 +177,8 @@ def connect_server(alias, authkey=None):
         "call_arg_oneliner_max": 2,
         "signature_arg_style": "{arg_name} {arg_type}"
     }
-    completerSettings[alias] = completerSettings.get(alias, defaultSettings) or defaultSettings
+    completer_settings.update(completerSettings.get(alias, {}))
+    completerSettings[alias] = completer_settings
     server = serverList.get(alias, None)
     if not server:
         return {'alias': alias, 'success':False, 'errormessage':'Unknown alias.'}
