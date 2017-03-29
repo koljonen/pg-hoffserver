@@ -397,12 +397,13 @@ def executor_queue_worker(alias):
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
                 if cur.description and not currentQuery['error']:
+                    case = completer.case if completer else lambda x: x
                     columns = [
                         {
-                            'name': completer.case(d.name),
+                            'name': case(d.name),
                             'type_code': d.type_code,
                             'type': type_dict[alias][d.type_code],
-                            'field':completer.case(d.name) + str(i),
+                            'field':case(d.name) + str(i),
                             'data_length': 0
                         } for i, d in enumerate(cur.description, 1)
                     ]
@@ -412,7 +413,7 @@ def executor_queue_worker(alias):
                         rowdict = {}
                         currentQuery['rows'].append(rowdict)
                         for col, data in zip(columns, row):
-                            rowdict[completer.case(col["field"])] = data
+                            rowdict[case(col["field"])] = data
                             col['data_length'] = max(len(to_str(data)), col['data_length'])
                 #update query result
                 currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
