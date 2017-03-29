@@ -171,7 +171,11 @@ def connect_server(alias, authkey=None):
         'generate_aliases' : True,
         'casing_file' : os.path.expanduser('~/.config/pgcli/casing'),
         'generate_casing_file' : True,
-        'single_connection': True
+        'single_connection': True,
+        "call_arg_style": "{arg_name} := ${{{arg_num}:{arg_default}}}",
+        "call_arg_display_style": "{arg_name}:={arg_default}",
+        "call_arg_oneliner_max": 2,
+        "signature_arg_style": "{arg_name} {arg_type}"
     }
     completerSettings[alias] = completerSettings.get(alias, defaultSettings) or defaultSettings
     server = serverList.get(alias, None)
@@ -676,7 +680,7 @@ def app_completions():
             dt_out = [{'text': c, 'type': 'Dynamic table'} for c in dynamic_tables_match]
         comps = completers[alias].get_completions(
                     Document(text=query, cursor_position=int(pos)), None)
-        comps_out = [{'text': c.text, 'type': c._display_meta} for c in comps]
+        comps_out = [{'text': c.text, 'type': c._display_meta, 'displayText': c.display} for c in comps]
         out = dt_out + comps_out
         return Response(to_str(json.dumps(out)), mimetype='text/json')
     return Response(to_str(json.dumps({'success':False, 'errormessage':'Not connected to server.'})), mimetype='text/json')
