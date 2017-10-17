@@ -391,6 +391,13 @@ def executor_queue_worker(alias):
                 queryResults[uid] = currentQuery
                 #Check if there are any dynamic tables in the query
                 query = update_query_with_dynamic_tables(queryResults[uid]['query'])
+                if len(query) == 0 and len(queryResults[uid]['query']) > 0:
+                    currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+                    currentQuery['complete'] = True
+                    currentQuery['executing'] = False
+                    currentQuery['statusmessage'] = 'DROP DYNAMIC'
+                    queryResults[uid] = currentQuery
+                    continue
                 #run query
                 try:
                     cur.execute(query)
@@ -435,7 +442,10 @@ def update_query_with_dynamic_tables(query):
     if not dynamic_tables:
         return query
     for x in dynamic_tables:
-        if '##' + x['dynamic_table_name'] in query:
+        if ('drop dynamic ##' + x['dynamic_table_name']) in re.sub(r"(\s+)", " ", query, 0).lower():
+            delete_dynamic_table(x['dynamic_table_name'])
+            query = ''
+        elif '##' + x['dynamic_table_name'] in query:
             query = query.replace('##' + x['dynamic_table_name'], construct_dynamic_table(x['dynamic_table_name']))
     return query
 
@@ -548,16 +558,10 @@ def create_dynamic_table(queryid, name):
     conn.close()
     return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
 
-def delete_dynamic_table(uuid = None, alias = None):
+def delete_dynamic_table(table_name):
     conn = sqlite3.connect(home_dir + '/' + db_name)
-    if uuid:
-        where_sql = ' WHERE uuid = ?;'
-        param = uuid
-    elif alias:
-        where_sql = 'WHERE alias = ?;'
-        param = alias
-    else:
-        where_sql = ';'
+    where_sql = ' WHERE dynamic_table_name = ?;'
+    param = table_name
     conn.cursor().execute('UPDATE QueryData SET dynamic_table_name = NULL' + where_sql, (param,))
     conn.commit()
     conn.close()
@@ -594,7 +598,7 @@ def construct_dynamic_table(dynamic_table_name):
                 if header['type'] in ('integer', 'bigint', 'numeric', 'smallint'):
                     values.append(to_str(row[header['field']]))
                 else:
-                    values.append("'" + to_str(row[header['field']]) + "'")
+                    values.append("'" + to_str(row[header['field']]).replace("'", "''") + "'")
             else:
                 values.append('NULL')
         output.append(','.join(values))
@@ -679,7 +683,7 @@ def app_completions():
     dt_out = []
     if alias in completers:
         if dynamic_tables_match:
-            dt_out = [{'text': c, 'type': 'Dynamic table'} for c in dynamic_tables_match]
+            dt_out = [{'text': c, 'type': 'Dynamic table', 'displayText': c} for c in dynamic_tables_match]
         comps = completers[alias].get_completions(
                     Document(text=query, cursor_position=int(pos)), None)
         comps_out = [{'text': c.text, 'type': c._display_meta, 'displayText': c.display} for c in comps]
