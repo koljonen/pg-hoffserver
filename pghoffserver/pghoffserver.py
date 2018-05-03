@@ -684,7 +684,7 @@ def get_meta_data(alias, name):
     print(comps, file=sys.stderr)
 
 def write_csv_file(queryid, options, path):
-    if(not os.path.exists(path)):
+    if(not os.path.isdir(os.path.dirname(os.path.abspath(path)))):
         return False
 
     result = queryResults[queryid] or result_cache and result_cache[queryid]['result']
