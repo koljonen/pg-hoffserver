@@ -1,5 +1,5 @@
 from __future__ import unicode_literals, print_function
-import sys, os, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re, hoffparser
+import sys, csv, ast, os, logging, uuid, datetime, time, psycopg2, sqlparse, sqlite3, re, hoffparser
 import simplejson as json
 from flask import Flask, request, Response, render_template
 from threading import Lock, Thread
@@ -8,6 +8,8 @@ from collections import defaultdict
 from collections import OrderedDict
 from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
+from pgspecial.main import (PGSpecial, NO_QUERY, PAGER_OFF)
+
 from pgcli.completion_refresher import CompletionRefresher
 from prompt_toolkit.document import Document
 from itsdangerous import Serializer
@@ -16,6 +18,7 @@ try:
 except ImportError:
     from urllib.parse import urlparse
 special = PGSpecial()
+
 from psycopg2.extensions import (TRANSACTION_STATUS_IDLE,
                                 TRANSACTION_STATUS_ACTIVE,
                                 TRANSACTION_STATUS_INTRANS,
@@ -43,6 +46,13 @@ uuids_pending_execution = []
 result_cache = defaultdict(list)
 executor_queues = defaultdict(lambda: Queue())
 db_name = 'hoff.db'
+
+logger = logging.getLogger('mylogger')
+
+def my_handler(type, value, tb):
+    logger.exception("Uncaught exception: {0}".format(str(value)))
+
+sys.excepthook = my_handler
 
 def main():
     global serverList
@@ -86,13 +96,18 @@ def main():
     t.start()
 
 def init_db():
+    conn = sqlite3.connect(home_dir + '/' + db_name)
+    cur = conn.cursor()
+    cur.execute("pragma user_version")
+    row = cur.fetchone()
+    dbversion = (row[0])
+
     sql = """CREATE TABLE IF NOT EXISTS QueryData(
       alias text, batchid text, queryid text, dynamic_table_name text, columns text, rows text,
       query text, notices text, statusmessage text,
       runtime_seconds int, error text,
       datestamp timestamp
     )"""
-    conn = sqlite3.connect(home_dir + '/' + db_name)
     conn.execute(sql)
     sql = """CREATE TABLE IF NOT EXISTS CellOperations(
       name text, colloperationcell text, celloperationtype, query text
@@ -102,6 +117,14 @@ def init_db():
       celloperationcell text, checkname text, validationcell text,
       comparisoncell text, comparisonvalue text, operator text
     )"""
+    conn.execute(sql)
+
+    if dbversion == 0:
+        sql = "ALTER TABLE QueryData ADD column messages text"
+        conn.execute(sql)
+        sql = "pragma user_version = 1"
+        conn.execute(sql)
+
     conn.close()
     t = Thread(target=db_worker,
                    name='db_worker')
@@ -114,10 +137,10 @@ def db_worker():
         dbitem = dbSyncQueue.get(block=True)
         if dbitem['operation'] == 'write':
             r = dbitem['data']
-            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            conn.cursor().execute("INSERT INTO QueryData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                 (r['alias'], r['batchid'], r['queryid'], None, json.dumps(r['columns']), json.dumps(r['rows'], default=str),
                 r['query'], json.dumps(r['notices']),
-                r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp']))
+                r['statusmessage'], r['runtime_seconds'], r['error'], r['timestamp'], json.dumps(r.get('messages'), default=str)))
             conn.commit()
         if dbitem['operation'] == 'delete_query':
             conn.cursor().execute("DELETE QueryData WHERE alias = :a AND datestamp < date('now','-:d days')",
@@ -149,6 +172,17 @@ def to_str(string):
     if sys.version_info < (3,0):
          return unicode(string)
     return str(string)
+
+def generateTable (tbl, borderHorizontal = '-', borderVertical = '|', borderCross = '+'):
+    cols = [list(x) for x in zip(*tbl)]
+    lengths = [max(map(len, map(str, col))) for col in cols]
+    f = borderVertical + borderVertical.join(' {:>%d} ' % l for l in lengths) + borderVertical
+    s = borderCross + borderCross.join(borderHorizontal * (l+2) for l in lengths) + borderCross
+    ret = s
+    for row in tbl:
+        ret += '\n' + (f.format(*row))
+        ret += '\n' + s
+    return ret
 
 def write_config():
     with open(home_dir + '/config.json', mode='w') as configfile:
@@ -388,6 +422,7 @@ def executor_queue_worker(alias):
                 currentQuery = queryResults[uid]
                 currentQuery['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
                 currentQuery['executing'] = True
+                currentQuery['messages'] = []
                 queryResults[uid] = currentQuery
                 #Check if there are any dynamic tables in the query
                 query = update_query_with_dynamic_tables(queryResults[uid]['query'])
@@ -400,9 +435,32 @@ def executor_queue_worker(alias):
                     continue
                 #run query
                 try:
+                    # First try to run each query as special
+                    if special:
+                        messages = []
+                        gotmessage = False
+                        try:
+                            for result in special.execute(cur, query):
+                                if result[1] and result[2]:
+                                    x = [result[2]] + [x for x in result[1]]
+                                    messages.append(generateTable(x) + '\n' + result[3])
+                            currentQuery['messages'] = messages
+                            currentQuery['statusmessage'] = query
+                            gotmessage = True
+                        except Exception as e:
+                            if len(e.args) > 0:
+                                gotmessage = True
+                                currentQuery['error'] = to_str(e)
+                        if gotmessage:
+                            currentQuery['runtime_seconds'] = int(time.mktime(datetime.datetime.now().timetuple())-timestamp_ts)
+                            currentQuery['complete'] = True
+                            currentQuery['executing'] = False
+                            queryResults[uid] = currentQuery
+                            continue
                     cur.execute(query)
                 except psycopg2.Error as e:
                     currentQuery['error'] = to_str(e)
+
                 if cur.description and not currentQuery['error']:
                     case = completer.case if completer else lambda x: x
                     columns = [
@@ -498,6 +556,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 'query': row["query"],
                 'notices': json.loads(row["notices"]),
                 'statusmessage': row["statusmessage"],
+                'messages': row['messages'],
                 'complete': True,
                 'executing': False,
                 'timestamp': row["datestamp"],
@@ -538,6 +597,7 @@ def fetch_result(uuid, rows_from=None, rows_to=None):
                 'query': result["query"],
                 'notices': result["notices"],
                 'statusmessage': result["statusmessage"],
+                'messages': result['messages'],
                 'complete': result['complete'],
                 'executing': result['executing'],
                 'timestamp': result["timestamp"],
@@ -622,6 +682,43 @@ def get_meta_data(alias, name):
     comps = completers[alias].get_completions(
                 Document(text='select * from bank', cursor_position=18), None)
     print(comps, file=sys.stderr)
+
+def write_csv_file(queryid, options, path):
+    if(not os.path.exists(path)):
+        return False
+
+    result = queryResults[queryid] or result_cache and result_cache[queryid]['result']
+    rows = None
+    columns = None
+    if result:
+        rows = result["rows"]
+        columns = result["columns"]
+    if not result:
+        conn = sqlite3.connect(home_dir + '/' + db_name)
+        conn.row_factory = dict_factory
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM QueryData WHERE queryid = ?;', (queryid,))
+        result = cur.fetchone()
+        rows = json.loads(result["rows"])
+        columns = json.loads(result["columns"])
+
+    if not result:
+        return False
+
+    fieldnames = [x['name'] for x in columns]
+    with open(path, 'w') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=(str(options.get('delimiter') or ';') if options else str(';')), quoting=csv.QUOTE_ALL)
+        writer.writeheader()
+        for row in rows:
+            out = '{'
+            for column in columns:
+                if row[column['field']]:
+                    out += "'''" + to_str(column['name']) + "''':'''" + to_str(row[column['field']]) + "''',"
+
+            out = out[:-1] + '}'
+            writer.writerow(ast.literal_eval(out))
+
+    return True
 
 app = Flask(__name__)
 @app.route("/query", methods=['POST'])
@@ -814,6 +911,16 @@ def app_search():
     if not result:
         return Response(to_str(json.dumps({'success':False, 'errormessage':'No queries match the given search criteria.'})), mimetype='text/json')
     return Response(to_str((json.dumps(result))), mimetype='text/json')
+
+@app.route("/write_csv_file", methods=['POST'])
+def app_write_csv_file():
+    queryid = request.form['queryid']
+    options = request.form.get('options')
+    path = request.form['path']
+    result = write_csv_file(queryid, options, path)
+    if not result:
+        return Response(to_str(json.dumps({'success':False, 'errormessage':'Could not write csv file.'})), mimetype='text/json')
+    return Response(to_str(json.dumps({'success':True})), mimetype='text/json')
 
 @app.route("/get_meta_data", methods=['POST'])
 def app_get_meta_data():
