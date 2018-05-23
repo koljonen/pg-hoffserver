@@ -9,10 +9,13 @@ from collections import OrderedDict
 from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
 from pgspecial.main import (PGSpecial, NO_QUERY, PAGER_OFF)
-
+from hoffimporter import HoffImporter
+from pgcli.pgcompleter import PGCompleter
 from pgcli.completion_refresher import CompletionRefresher
 from prompt_toolkit.document import Document
 from itsdangerous import Serializer
+from os.path import expanduser
+
 try:
     from urlparse import urlparse
 except ImportError:
@@ -59,6 +62,12 @@ def main():
     global config
     global apikey
     global completerSettings
+
+    #make sure ~/.config/pgcli directory exists
+    pgcli_dir = expanduser("~/.config/pgcli")
+    if not os.path.exists(pgcli_dir):
+        os.makedirs(pgcli_dir)
+
     # Stop psycopg2 from mangling intervals
     psycopg2.extensions.register_type(psycopg2.extensions.new_type(
         (1186,), str("intrvl"), lambda val, cur: val))
@@ -150,7 +159,6 @@ def db_worker():
             conn.cursor().execute("UPDATE QueryData SET rows = NULL WHERE alias = :a AND datestamp < date('now','-:d days')",
                                  ({'a':dbitem['alias'], 'd':dbitem['days']}));
             conn.commit()
-
 
 def cleanup_worker():
     while True:
@@ -371,7 +379,7 @@ def queue_query(alias, sql, cursor_pos):
     batchid = to_str(uuid.uuid1())
     statementlength = 0
     query_found = False
-    for sql in sqlparse.split(sql):
+    for sql in sqlparse.split(sql if sql else ''):
         statementlength += len(sql)
         if cursor_pos:
             if cursor_pos >= statementlength:
@@ -400,6 +408,56 @@ def queue_query(alias, sql, cursor_pos):
         executor_queues[alias].put({'uuid': queryid})
         queryids.append(queryid)
     return {'queryids': queryids, 'batchid': batchid}
+
+def create_import(hoffimportfile):
+    import_queue = []
+    queryids = []
+    importer = HoffImporter(hoffimportfile)
+    from_queries = importer.get_from_queries()
+    to_queries = importer.get_to_queries()
+    sequential_queries = []
+    sequential_queries.append(from_queries)
+    sequential_queries.append(to_queries)
+
+    batchid = to_str(uuid.uuid1())
+    for sq in sequential_queries:
+        for query in sq['queries']:
+            queryid = to_str(uuid.uuid1())
+            queryResults[queryid] = {
+                'alias': sq['alias'],
+                'batchid': batchid,
+                'queryid': queryid,
+                'columns': None,
+                'rows': None,
+                'query': query,
+                'notices': None,
+                'statusmessage': None,
+                'complete': False,
+                'executing': False,
+                'timestamp': None,
+                'runtime_seconds': None,
+                'error':None,
+                'transaction_status':None,
+                'dynamic_alias': None
+            }
+            import_queue.append({'alias': sq['alias'], 'uuid': queryid})
+            queryids.append(queryid)
+
+    t = Thread(target=import_worker,
+                   args=(import_queue,),
+                   name='import_worker')
+    t.setDaemon(True)
+    t.start()
+
+    return batchid, queryids
+
+def import_worker(import_queue):
+    for queue in import_queue:
+        executor_queues[queue['alias']].put({'uuid': queue['uuid']})
+        while(True):
+            if not queryResults[queue['uuid']] or queryResults[queue['uuid']]['complete']:
+                break
+            time.sleep(0.1)
 
 def executor_queue_worker(alias):
     executor = executors[alias]
@@ -952,6 +1010,18 @@ def app_update_completer_settings():
     except Exception as e:
         return Response(to_str(json.dumps({'success':False, 'errormessage': 'Not connected.'})), mimetype='text/json')
     return Response(to_str(json.dumps({'success':True, 'errormessage': None})), mimetype='text/json')
+
+@app.route("/hoff_import", methods=['POST'])
+def app_hoff_import():
+    hoffimportfile = request.form.get('hoffimportfile')
+    if not hoffimportfile:
+        return Response(to_str(json.dumps({'success':False, 'errormessage': 'Unknown hoffimport file.'})), mimetype='text/json')
+
+    batchid, queryids = create_import(hoffimportfile)
+    urls = []
+    for qid in queryids:
+        urls.append('localhost:5000/result/' + qid)
+    return Response(to_str(json.dumps({'success':True, 'batchid':batchid, 'queryids':queryids, 'Urls':urls, 'errormessage':None})), mimetype='text/json')
 
 @app.route('/')
 def site_main():
