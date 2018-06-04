@@ -1,10 +1,11 @@
-import sys, os, ntpath
+import sys, os, ntpath, re
 from os.path import expanduser
 
 class HoffImporter:
     dir = None
     filecontent = None
     sources = None
+    skip_download = False
     def __init__(self, filepath):
         head, tail = ntpath.split(filepath)
         home = expanduser("~")
@@ -40,18 +41,20 @@ class HoffImporter:
             return None
         return {'from': source, 'to': target}
 
+
     def build_from_line(self, table, columns, filter):
+        table_name = re.match(r'(\w+\.?\w*).*', table.rstrip('\n')).groups(0)[0]
         output = '\copy (SELECT ' + (columns.rstrip('\n') if columns else '*') + ' FROM ' + table.rstrip('\n') + ((' WHERE ' + filter.rstrip('\n')) if filter else '') + ')'
-        output += ' TO ' + '\'' + self.dir + table.rstrip('\n') + '.csv' + '\'' + ' WITH CSV HEADER'
+        output += ' TO ' + '\'' + self.dir + table_name + '.csv' + '\'' + ' WITH CSV HEADER'
         return output + '\n'
 
     def build_to_line(self, table, columns, filter):
+        table_name = re.match(r'(\w+\.?\w*).*', table.rstrip('\n')).groups(0)[0]
         output = []
         #output.append('TRUNCATE TABLE  ' + table.rstrip('\n') + ' CASCADE')
-        output.append('ALTER TABLE ' + table.rstrip('\n') + ' DISABLE TRIGGER ALL')
-        output.append('\copy ' + table.rstrip('\n') + ' FROM ' + '\'' + self.dir + table.rstrip('\n') + '.csv' + '\'' + ' WITH CSV HEADER')
-        output.append('ALTER TABLE ' + table.rstrip('\n') + ' ENABLE TRIGGER ALL')
-
+        output.append('ALTER TABLE ' + table_name + ' DISABLE TRIGGER ALL')
+        output.append('\copy ' + table_name + ' FROM ' + '\'' + self.dir + table_name + '.csv' + '\'' + ' WITH CSV HEADER')
+        output.append('ALTER TABLE ' + table_name + ' ENABLE TRIGGER ALL')
         return output
 
     def build_import(self, filecontent, import_part):
@@ -61,6 +64,7 @@ class HoffImporter:
         table = None
         columns = None
         filter = None
+        new_table = None
         linenumber = 0
         for current_line in filecontent:
             old_state = state
@@ -74,6 +78,8 @@ class HoffImporter:
             elif current_line[:7] == '#filter':
                 state = 'filter'
                 filter = current_line[8:]
+            elif current_line[:14] == '#skip_download':
+                self.skip_download = True
             else:
                 continue
             if state == 'table' and not new_table or new_table == '':
@@ -86,7 +92,7 @@ class HoffImporter:
             # if new state is table and old state is not a table we can cunstruct an output
             # if both are table then we wait for columns and/or filter or to the end of the file to cunstruct the next output
             if state == 'table' and old_state and old_state != 'table':
-                if import_part == 'from':
+                if import_part == 'from' and not self.skip_download:
                     output.append(self.build_from_line(table, columns, filter))
                 elif import_part == 'to':
                     output += self.build_to_line(table, columns, filter)
@@ -95,7 +101,7 @@ class HoffImporter:
                 filter = None
             table = new_table
         if table:
-            if import_part == 'from':
+            if import_part == 'from' and not self.skip_download:
                 output.append(self.build_from_line(table, columns, filter))
             elif import_part == 'to':
                 output += self.build_to_line(table, columns, filter)

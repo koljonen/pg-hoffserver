@@ -10,6 +10,7 @@ from pgcli.pgexecute import PGExecute
 from pgspecial import PGSpecial
 from pgspecial.main import (PGSpecial, NO_QUERY, PAGER_OFF)
 from hoffimporter import HoffImporter
+from hoffeye import HoffEye
 from pgcli.pgcompleter import PGCompleter
 from pgcli.completion_refresher import CompletionRefresher
 from prompt_toolkit.document import Document
@@ -38,6 +39,8 @@ completers = defaultdict(list)  # Dict mapping urls to pgcompleter objects
 completer_lock = Lock()
 completerSettings = defaultdict(list)
 executors = defaultdict(list)  # Dict mapping buffer ids to pgexecutor objects
+hoffeyes = defaultdict(list)
+
 executor_lock = defaultdict(lambda: Lock())
 bufferConnections = defaultdict(str) #Dict mapping bufferids to connectionstrings
 queryResults = defaultdict(list)
@@ -207,6 +210,27 @@ def remove_server(alias):
     if serverList.get(alias):
         del serverList[alias]
     write_config()
+
+def start_hoffeye(alias, query, authkey=None):
+    print(alias, query)
+    if hoffeyes[alias] and query:
+        hoffeyes[alias].add_watch(query)
+    else:
+        server = serverList.get(alias, None)
+        dsn = server.get('dsn')
+        executor = new_executor(server['url'], dsn, authkey)
+        hoffeyes[alias] = HoffEye(executor)
+        if query:
+            hoffeyes[alias].add_watch(query)
+        hoffeyes[alias].start()
+
+def stop_hoffeye(alias):
+    if hoffeyes[alias]:
+        hoffeyes[alias].stop()
+
+def clear_hoffeye(alias):
+    if hoffeyes[alias]:
+        hoffeyes[alias].clear()
 
 def connect_server(alias, authkey=None):
     completer_settings = {
@@ -1022,6 +1046,39 @@ def app_hoff_import():
     for qid in queryids:
         urls.append('localhost:5000/result/' + qid)
     return Response(to_str(json.dumps({'success':True, 'batchid':batchid, 'queryids':queryids, 'Urls':urls, 'errormessage':None})), mimetype='text/json')
+
+@app.route("/hoffeye_new", methods=['POST'])
+def new_hoffeye():
+    alias = request.form.get('alias')
+    authkey = request.form.get('authkey')
+    query = request.form.get('query')
+    start_hoffeye(alias, query, authkey)
+    return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+
+@app.route("/hoffeye_result", methods=['POST'])
+def hoffeye_result():
+    alias = request.form.get('alias')
+
+    return Response(to_str(json.dumps(hoffeyes[alias].result())), mimetype='text/json')
+
+@app.route("/hoffeye_stop", methods=['POST'])
+def hoffeye_stop():
+    alias = request.form.get('alias')
+    stop_hoffeye(alias)
+    return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+
+@app.route("/hoffeye_start", methods=['POST'])
+def hoffeye_start():
+    alias = request.form.get('alias')
+    start_hoffeye(alias, None, None)
+    return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+
+@app.route("/hoffeye_clear", methods=['POST'])
+def hoffeye_clear():
+    alias = request.form.get('alias')
+    clear_hoffeye(alias)
+    return Response(to_str(json.dumps({'success':True, 'errormessage':None})), mimetype='text/json')
+
 
 @app.route('/')
 def site_main():
