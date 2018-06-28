@@ -3,6 +3,11 @@ from collections import defaultdict
 from threading import Thread
 import copy
 
+def to_str(string):
+    if sys.version_info < (3,0):
+         return unicode(string)
+    return str(string)
+
 #these queries go outside of the regular flow and therefor don't get logged
 class HoffEye:
 
@@ -23,11 +28,6 @@ class HoffEye:
         with self.executor.conn.cursor() as cur:
             cur.execute('SELECT oid, oid::regtype::text FROM pg_type')
             self.type_dict = dict(row for row in cur.fetchall())
-
-    def to_str(self, string):
-        if sys.version_info < (3,0):
-             return unicode(string)
-        return str(string)
 
     def status(self):
         return {'watching': self.watching }
