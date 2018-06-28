@@ -1,0 +1,27 @@
+All text that is not a command will be ignored.
+All commands begin with a #.
+
+First you need to set the target and the source of the import, these are pghoff server aliases and are case sensitive.
+Make sure you are connected to both before importing.
+#source Live
+#target Vagrant
+
+If you have already made an import and do not wish to use the same data as last time you can use the #skip_download command.
+
+To make an import you need to use the table command. To select specific columns and a filter use the columns and filter commands.
+
+#table Users
+#filter Username = 'hoff'
+
+#table Transactions
+#columns TransactionID, Datestamp
+#filter Datestamp > '2017-01-01'
+
+#table Invoices
+#columns *
+
+You can use joins and aliases
+
+#table Users U JOIN BankAccounts BA ON Users.UserID = BankAccounts.UserID
+#columns U.*, BA.BankAccountName
+#filter BA.BankAccountType = 'private'
