@@ -162,6 +162,9 @@ def db_worker():
             conn.cursor().execute("UPDATE QueryData SET rows = NULL WHERE alias = :a AND datestamp < date('now','-:d days')",
                                  ({'a':dbitem['alias'], 'd':dbitem['days']}));
             conn.commit()
+        if dbitem['operation'] == 'vacuum':
+            conn.cursor().execute("vacuum;");
+            conn.commit()
 
 def cleanup_worker():
     while True:
@@ -178,6 +181,7 @@ def cleanup_worker():
             days = serverList[alias].get('query_retention')
             if days:
                 dbSyncQueue.put({'operation':'delete_query', 'alias': alias, 'days': days}, block=False)
+            dbSyncQueue.put({'operation':'vacuum'}, block=False)
 
 def to_str(string):
     if sys.version_info < (3,0):
